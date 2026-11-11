@@ -41,11 +41,11 @@
 готовый `HORDE.vst3` скачивается во вкладке **Actions → последний запуск → Artifacts**.
 
 ### Вариант Б: локально
-1. Установите **Visual Studio 2022 Build Tools** с компонентом «Разработка классических приложений на C++»,
+1. Установите **Visual Studio Build Tools (2022 или новее)** с компонентом «Разработка классических приложений на C++»,
    а также **CMake** и **Git**.
 2. В папке проекта:
    ```
-   cmake -B build -G "Visual Studio 17 2022" -A x64
+   cmake -B build -A x64
    cmake --build build --config Release --target HORDE_VST3
    ```
    JUCE 8.0.4 скачается автоматически.
