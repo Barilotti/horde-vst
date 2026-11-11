@@ -894,7 +894,7 @@ Content::Content (HordeProcessor& p)
     addButton.setTooltip (juce::String::fromUTF8 ("Загрузить файлы дублей (WAV/AIFF/FLAC/MP3) прямо в плагин. Их можно и просто перетащить в окно."));
     addAndMakeVisible (addButton);
 
-    linkButton.setTooltip (juce::String::fromUTF8 ("REAPER: подключить дорожки с дублями, которые лежат внутри этой папки, к входам HORDE. Нажимайте ещё раз после добавления дорожек."));
+    linkButton.setTooltip (juce::String::fromUTF8 ("REAPER: забрать аудио дублей со всех дорожек внутри этой папки (как будто вы перетащили их файлами). Нажимайте ещё раз после записи или правки дублей."));
     linkButton.onClick = [this]
     {
         const auto r = proc.linkChildTracks();

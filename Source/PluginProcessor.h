@@ -5,7 +5,7 @@
 #include "CrowdEngine.h"
 #include "ReaperBridge.h"
 
-class HordeProcessor : public juce::AudioProcessor
+class HordeProcessor : public juce::AudioProcessor, private juce::AsyncUpdater
 {
 public:
     HordeProcessor();
@@ -57,6 +57,10 @@ private:
     ReaperBridge reaperBridge;
     juce::AudioFormatManager formats;
     void publishTakes();
+    void handleAsyncUpdate() override;
+    static std::shared_ptr<horde::Take> makeTake (const juce::AudioBuffer<float>&, double sampleRate,
+                                                  const juce::String& name, const juce::String& path, bool female);
+    bool linkedToTracks = false;
 
     struct Raw
     {

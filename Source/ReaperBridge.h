@@ -12,6 +12,15 @@ public:
         bool ok = false;
         juce::String message;
         int males = 0, females = 0;
+
+        struct TrackAudio
+        {
+            juce::String name;
+            bool female = false;
+            double sampleRate = 48000.0;
+            juce::AudioBuffer<float> mono;
+        };
+        std::vector<TrackAudio> audio;   // full audio of every take track, read from its items
     };
 
     void setIHostApplication (Steinberg::FUnknown* host) override;

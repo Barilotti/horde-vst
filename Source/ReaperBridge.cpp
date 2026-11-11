@@ -130,50 +130,82 @@ ReaperBridge::Result ReaperBridge::linkChildTracks()
         return r;
     }
 
-    // Male takes on the first inputs, female after them (that's how the plugin knows the gender)
-    std::stable_sort (kids.begin(), kids.end(), [] (const Child& a, const Child& b) { return ! a.female && b.female; });
+    using CreateAccFn  = void*  (*) (void*);
+    using AccTimeFn    = double (*) (void*);
+    using AccSamplesFn = int    (*) (void*, int, int, double, int, double*);
+    using DestroyAccFn = void   (*) (void*);
+    auto createAcc  = (CreateAccFn)  getApi ("CreateTrackAudioAccessor");
+    auto accStart   = (AccTimeFn)    getApi ("GetAudioAccessorStartTime");
+    auto accEnd     = (AccTimeFn)    getApi ("GetAudioAccessorEndTime");
+    auto accSamples = (AccSamplesFn) getApi ("GetAudioAccessorSamples");
+    auto destroyAcc = (DestroyAccFn) getApi ("DestroyAudioAccessor");
+    if (! (createAcc && accStart && accEnd && accSamples && destroyAcc))
+    {
+        r.message = "Could not reach REAPER's audio reading functions (old REAPER version?).";
+        return r;
+    }
 
     if (undoBegin) undoBegin (proj);
 
-    for (size_t i = 0; i < kids.size(); ++i)
-    {
-        void* t = kids[i].track;
+    constexpr double readRate = 48000.0;
+    constexpr int chunk = 48000;
+    std::vector<double> buf ((size_t) chunk * 2);
 
-        // remove our previous sends from this child
+    for (auto& kid : kids)
+    {
+        void* t = kid.track;
+
+        // undo the old v0.3 routing (sends into HORDE) if it is still there
         for (int s = numSends (t, 0) - 1; s >= 0; --s)
             if (sendInfo (t, 0, s, "P_DESTTRACK", nullptr) == me)
                 removeSnd (t, 0, s);
 
-        // child no longer sums into the folder directly; it feeds its own HORDE input instead
+        // the takes are played by HORDE now, so they no longer sound directly through the folder
         setVal (t, "B_MAINSEND", 0.0);
 
-        const int idx = createSnd (t, me);
-        if (idx >= 0)
+        // read the whole track (all its items) as audio
+        void* acc = createAcc (t);
+        if (acc == nullptr) continue;
+        const double t0 = accStart (acc), t1 = juce::jmin (accEnd (acc), accStart (acc) + 15.0 * 60.0);
+        const int total = (int) ((t1 - t0) * readRate);
+        if (total > (int) readRate / 2)
         {
-            const int dest = (int) (i % 8);
-            setSend (t, 0, idx, "I_SRCCHAN", 0.0);                       // track channels 1-2
-            setSend (t, 0, idx, "I_DSTCHAN", (double) (dest | 1024));    // mixed to mono, into input <dest+1>
-            setSend (t, 0, idx, "I_SENDMODE", 0.0);                      // post-fader
-            setSend (t, 0, idx, "D_VOL", 1.0);
+            Result::TrackAudio ta;
+            ta.name = kid.name.isNotEmpty() ? kid.name : juce::String ("Track");
+            ta.female = kid.female;
+            ta.sampleRate = readRate;
+            ta.mono.setSize (1, total);
+            float* dst = ta.mono.getWritePointer (0);
+            for (int pos = 0; pos < total; pos += chunk)
+            {
+                const int n = juce::jmin (chunk, total - pos);
+                std::fill (buf.begin(), buf.end(), 0.0);
+                accSamples (acc, (int) readRate, 2, t0 + pos / readRate, n, buf.data());
+                for (int i = 0; i < n; ++i)
+                    dst[pos + i] = (float) (0.5 * (buf[(size_t) i * 2] + buf[(size_t) i * 2 + 1]));
+            }
+            if (ta.mono.getMagnitude (0, 0, total) > 1.0e-4f)
+            {
+                if (kid.female) ++r.females; else ++r.males;
+                r.audio.push_back (std::move (ta));
+            }
         }
-
-        if (kids[i].female) ++r.females; else ++r.males;
+        destroyAcc (acc);
     }
 
-    const int used = juce::jmin ((int) kids.size(), 8);
-    const int need = juce::jmax (2, ((used + 1) / 2) * 2);
-    if ((int) getVal (me, "I_NCHAN") < need)
-        setVal (me, "I_NCHAN", (double) need);
-
-    if (undoEnd) undoEnd (proj, "HORDE: link take tracks", -1);
+    if (undoEnd) undoEnd (proj, "HORDE: load take tracks", -1);
     if (adjust) adjust (false);
 
+    if (r.audio.empty())
+    {
+        r.message = "The tracks inside the folder have no audio yet.";
+        return r;
+    }
+
     r.ok = true;
-    r.message = "Linked " + juce::String ((int) kids.size()) + " take track(s): "
-              + juce::String (r.males) + " male, " + juce::String (r.females) + " female.";
-    if (kids.size() > 8)
-        r.message << "\nHORDE has 8 inputs, so tracks 9+ share inputs with the first ones.";
-    r.message << "\n\nGender is guessed from track names (female if the name has F, fem, woman, жен...). "
-                 "Adjust with the MALE INPUTS knob if needed. Press LINK again after adding tracks.";
+    r.message = "Loaded " + juce::String ((int) r.audio.size()) + " take track(s): "
+              + juce::String (r.males) + " male, " + juce::String (r.females) + " female.\n\n"
+              "Gender is guessed from track names (F, fem, woman...); click M/F in the list to change it. "
+              "Press LINK again after recording or editing takes.";
     return r;
 }

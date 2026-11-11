@@ -139,6 +139,55 @@ void HordeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
 juce::AudioProcessorEditor* HordeProcessor::createEditor() { return new HordeEditor (*this); }
 
 //==============================================================================
+std::shared_ptr<horde::Take> HordeProcessor::makeTake (const juce::AudioBuffer<float>& src, double sampleRate,
+                                                       const juce::String& name, const juce::String& path, bool female)
+{
+    const int len = src.getNumSamples();
+    juce::AudioBuffer<float> mono (1, len);
+    mono.clear();
+    for (int c = 0; c < src.getNumChannels(); ++c)
+        mono.addFrom (0, 0, src, c, 0, len, 1.0f / (float) src.getNumChannels());
+
+    // Squeeze out long silences (gaps between phrases/items) so voices land on actual shouting.
+    const int hop = juce::jmax (1, (int) (sampleRate * 0.01));
+    const int nh = len / hop;
+    std::vector<bool> keep ((size_t) nh, false);
+    for (int h = 0; h < nh; ++h)
+        if (mono.getRMSLevel (0, h * hop, hop) > 0.0018f)      // about -55 dBFS
+            for (int k = juce::jmax (0, h - 15); k <= juce::jmin (nh - 1, h + 15); ++k)
+                keep[(size_t) k] = true;
+    int outLen = 0;
+    for (int h = 0; h < nh; ++h) if (keep[(size_t) h]) outLen += hop;
+    if (outLen < (int) (sampleRate * 0.3))
+        return nullptr;
+
+    auto t = std::make_shared<horde::Take>();
+    t->sampleRate = sampleRate;
+    t->audio.setSize (1, outLen);
+    int w = 0;
+    for (int h = 0; h < nh; ++h)
+        if (keep[(size_t) h]) { t->audio.copyFrom (0, w, mono, 0, h * hop, hop); w += hop; }
+
+    // normalise peak to -3 dB so quiet and loud takes sit together
+    const float pk = t->audio.getMagnitude (0, 0, outLen);
+    if (pk > 1.0e-4f) t->audio.applyGain (0.708f / pk);
+
+    t->hop = hop;
+    float mx = 0.0f;
+    for (int s = 0; s + hop <= outLen; s += hop)
+    {
+        const float r = t->audio.getRMSLevel (0, s, hop);
+        t->env.push_back (r);
+        mx = juce::jmax (mx, r);
+    }
+    if (mx > 0.0f) for (auto& e : t->env) e /= mx;
+
+    t->name = name;
+    t->path = path;
+    t->female = female;
+    return t;
+}
+
 void HordeProcessor::addFiles (const juce::StringArray& paths)
 {
     for (const auto& path : paths)
@@ -155,33 +204,12 @@ void HordeProcessor::addFiles (const juce::StringArray& paths)
         juce::AudioBuffer<float> tmp ((int) rd->numChannels, len);
         rd->read (&tmp, 0, len, 0, true, true);
 
-        auto t = std::make_shared<horde::Take>();
-        t->sampleRate = rd->sampleRate;
-        t->audio.setSize (1, len);
-        t->audio.clear();
-        for (int c = 0; c < tmp.getNumChannels(); ++c)
-            t->audio.addFrom (0, 0, tmp, c, 0, len, 1.0f / (float) tmp.getNumChannels());
-
-        // normalise peak to -3 dB so quiet and loud takes sit together
-        const float pk = t->audio.getMagnitude (0, 0, len);
-        if (pk > 1.0e-4f) t->audio.applyGain (0.708f / pk);
-
-        t->hop = juce::jmax (1, (int) (rd->sampleRate * 0.01));
-        float mx = 0.0f;
-        for (int s = 0; s + t->hop <= len; s += t->hop)
-        {
-            const float r = t->audio.getRMSLevel (0, s, t->hop);
-            t->env.push_back (r);
-            mx = juce::jmax (mx, r);
-        }
-        if (mx > 0.0f) for (auto& e : t->env) e /= mx;
-
-        t->name = f.getFileNameWithoutExtension();
-        t->path = f.getFullPathName();
-        const auto lower = t->name.toLowerCase();
-        t->female = lower.contains ("fem") || lower.contains ("woman") || lower.contains (juce::String::fromUTF8 ("жен"))
-                    || lower.contains ("girl");
-        takes.push_back (t);
+        const auto name = f.getFileNameWithoutExtension();
+        const auto lower = name.toLowerCase();
+        const bool female = lower.contains ("fem") || lower.contains ("woman") || lower.contains (juce::String::fromUTF8 ("жен"))
+                            || lower.contains ("girl");
+        if (auto t = makeTake (tmp, rd->sampleRate, name, f.getFullPathName(), female))
+            takes.push_back (t);
     }
     publishTakes();
 }
@@ -191,22 +219,30 @@ ReaperBridge::Result HordeProcessor::linkChildTracks()
     auto r = reaperBridge.linkChildTracks();
     if (r.ok)
     {
-        if (auto* prm = apvts.getParameter ("maleTakes"))
-        {
-            prm->beginChangeGesture();
-            prm->setValueNotifyingHost (prm->convertTo0to1 ((float) juce::jmin (r.males, horde::kMaxTakes)));
-            prm->endChangeGesture();
-        }
-        if (auto* prm = apvts.getParameter ("takes"))
-            prm->setValueNotifyingHost (prm->convertTo0to1 (0.0f)); // Auto
+        // replace previously loaded track takes, keep dropped files
+        takes.erase (std::remove_if (takes.begin(), takes.end(),
+                                     [] (auto& t) { return t->path.startsWith ("track:"); }), takes.end());
+        for (auto& ta : r.audio)
+            if (auto t = makeTake (ta.mono, ta.sampleRate, ta.name, "track:" + ta.name, ta.female))
+                takes.push_back (t);
+        linkedToTracks = true;
+        publishTakes();
     }
     return r;
+}
+
+void HordeProcessor::handleAsyncUpdate()
+{
+    // re-read the take tracks after the project is opened
+    if (linkedToTracks && reaperBridge.available())
+        linkChildTracks();
 }
 
 void HordeProcessor::removeTake (int index)
 {
     if (juce::isPositiveAndBelow (index, (int) takes.size()))
         takes.erase (takes.begin() + index);
+    linkedToTracks = std::any_of (takes.begin(), takes.end(), [] (auto& t) { return t->path.startsWith ("track:"); });
     publishTakes();
 }
 
@@ -230,8 +266,10 @@ void HordeProcessor::getStateInformation (juce::MemoryBlock& destData)
     auto state = apvts.copyState();
     state.removeChild (state.getChildWithName ("Files"), nullptr);
     juce::ValueTree files ("Files");
+    files.setProperty ("linkTracks", linkedToTracks, nullptr);
     for (auto& t : takes)
-        files.appendChild (juce::ValueTree ("File", { { "path", t->path }, { "female", t->female.load() } }), nullptr);
+        if (! t->path.startsWith ("track:"))
+            files.appendChild (juce::ValueTree ("File", { { "path", t->path }, { "female", t->female.load() } }), nullptr);
     state.appendChild (files, nullptr);
     if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
@@ -255,7 +293,10 @@ void HordeProcessor::setStateInformation (const void* data, int sizeInBytes)
             apvts.replaceState (tree);
 
             takes.clear();
+            linkedToTracks = (bool) files.getProperty ("linkTracks", false);
             addFiles (paths);
+            if (linkedToTracks)
+                triggerAsyncUpdate();
             for (size_t i = 0; i < takes.size(); ++i)
                 for (int k = 0; k < paths.size(); ++k)
                     if (paths[k] == takes[i]->path && (size_t) k < fem.size())
