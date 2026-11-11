@@ -16,8 +16,14 @@ jobs:
       - name: Build VST3
         run: cmake --build build --config Release --target HORDE_VST3 --parallel
 
+      - name: Stage plugin bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item -Recurse build/HORDE_artefacts/Release/VST3/HORDE.vst3 dist/
+
       - name: Upload plugin
         uses: actions/upload-artifact@v4
         with:
           name: HORDE-VST3-Windows-x64
-          path: build/HORDE_artefacts/Release/VST3/
+          path: dist/
