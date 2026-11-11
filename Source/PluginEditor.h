@@ -76,6 +76,19 @@ private:
     std::array<float, 2> lv {};
 };
 
+class TakesPanel : public juce::Component
+{
+public:
+    explicit TakesPanel (HordeProcessor& p) : proc (p) {}
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+private:
+    juce::Rectangle<float> rowBounds (int visibleRow) const;
+    HordeProcessor& proc;
+    int scroll = 0;
+};
+
 class RoomView : public juce::Component
 {
 public:
@@ -108,7 +121,7 @@ struct Panel
 };
 
 // All UI lives in this fixed-size (1120x700) component; the editor scales it.
-class Content : public juce::Component, private juce::Timer
+class Content : public juce::Component, public juce::FileDragAndDropTarget, private juce::Timer
 {
 public:
     explicit Content (HordeProcessor&);
@@ -117,9 +130,16 @@ public:
     void paintOverChildren (juce::Graphics&) override;
     void resized() override;
 
+    bool isInterestedInFileDrag (const juce::StringArray&) override;
+    void fileDragEnter (const juce::StringArray&, int, int) override { dragOver = true; repaint(); }
+    void fileDragExit (const juce::StringArray&) override { dragOver = false; repaint(); }
+    void filesDropped (const juce::StringArray&, int, int) override;
+
 private:
     void timerCallback() override;
     void reroll();
+    void updateMode();
+    void chooseFiles();
     Knob& addKnob (const char* id, const char* label, const char* range = "");
     void placeKnob (Knob&, juce::Rectangle<int> area);
 
@@ -128,6 +148,7 @@ private:
     Logo logo;
     Battlefield field;
     InputMeters meters;
+    TakesPanel takesPanel;
     OutputMeter outMeter;
     RoomView room;
     std::vector<std::unique_ptr<Knob>> knobs;
@@ -136,6 +157,9 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> balanceAtt;
     juce::TextButton rerollButton { "REROLL" };
     juce::Label seedValue;
+    juce::TextButton addButton { "+ ADD TAKES" };
+    std::unique_ptr<juce::FileChooser> chooser;
+    bool dragOver = false;
 };
 } // namespace horde::ui
 

@@ -439,6 +439,12 @@ void Battlefield::paint (juce::Graphics& g)
     g.drawText ("TOP VIEW", top.withLeft (cx + 12.0f), juce::Justification::centredLeft);
     g.setColour (Colours::red);
     g.fillEllipse (cx - 2.5f, top.getCentreY() - 2.5f, 5.0f, 5.0f);
+    {
+        const bool files = proc.getEngine().filesMode();
+        g.setFont (uiFont (10.5f, true, 0.2f));
+        g.setColour (files ? Colours::ember : Colours::textDim);
+        g.drawText (files ? "MODE: TAKE FILES" : "MODE: LIVE INPUT", juce::Rectangle<float> (r.getX() + 18, r.getY() + 10, 200, 14), juce::Justification::left);
+    }
     g.setColour (Colours::textDim);
     g.setFont (uiFont (14.0f, true));
     g.drawText ("L", juce::Rectangle<float> (r.getX() + 12, r.getCentreY() - 40, 20, 20), juce::Justification::centred);
@@ -511,7 +517,7 @@ void InputMeters::paint (juce::Graphics& g)
     const float slotW = inner.getWidth() / (float) horde::kMaxTakes;
     for (int i = 0; i < horde::kMaxTakes; ++i)
     {
-        const bool used = i < takes && i < nIn;
+        const bool used = takes == 0 ? proc.getEngine().slotActive (i) : (i < takes && i < nIn);
         const bool fem  = i >= male;
         auto col = juce::Rectangle<float> (inner.getX() + slotW * (float) i, inner.getY(), slotW, inner.getHeight());
         drawSegmentBar (g, col.withSizeKeepingCentre (juce::jmin (20.0f, slotW - 10.0f), col.getHeight()), lv[(size_t) i], used);
@@ -544,6 +550,88 @@ void OutputMeter::paint (juce::Graphics& g)
     const float w = (r.getWidth() - 4.0f) * 0.5f;
     drawSegmentBar (g, r.withWidth (w), lv[0], true, 18);
     drawSegmentBar (g, r.withTrimmedLeft (w + 4.0f), lv[1], true, 18);
+}
+
+//==============================================================================
+juce::Rectangle<float> TakesPanel::rowBounds (int visibleRow) const
+{
+    return { 14.0f, 44.0f + 23.0f * (float) visibleRow, (float) getWidth() - 28.0f, 21.0f };
+}
+
+void TakesPanel::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds().toFloat();
+    fillPanel (g, r);
+    const auto& takes = proc.getTakes();
+
+    g.setColour (Colours::red.brighter (0.2f));
+    g.setFont (uiFont (13.0f, true, 0.06f));
+    g.drawText ("TAKE FILES  (" + juce::String ((int) takes.size()) + ")", juce::Rectangle<float> (16, 10, 200, 22), juce::Justification::centredLeft);
+    g.setColour (Colours::textDim);
+    g.setFont (uiFont (10.5f));
+    g.drawText ("drop more anywhere", juce::Rectangle<float> (r.getWidth() - 136, 10, 122, 22), juce::Justification::centredRight);
+    g.setColour (Colours::panelEdge);
+    g.drawHorizontalLine (38, 14.0f, r.getWidth() - 14.0f);
+
+    const int visible = (int) ((r.getHeight() - 52.0f) / 23.0f);
+    scroll = juce::jlimit (0, juce::jmax (0, (int) takes.size() - visible), scroll);
+    for (int row = 0; row < visible; ++row)
+    {
+        const int i = row + scroll;
+        if (i >= (int) takes.size()) break;
+        auto& t = *takes[(size_t) i];
+        auto b = rowBounds (row);
+        g.setColour (juce::Colour (0xff1d1716));
+        g.fillRoundedRectangle (b, 4.0f);
+
+        const bool fem = t.female.load();
+        auto pill = juce::Rectangle<float> (b.getRight() - 52.0f, b.getY() + 3.0f, 24.0f, b.getHeight() - 6.0f);
+        g.setColour ((fem ? Colours::female : Colours::male).withAlpha (0.85f));
+        g.fillRoundedRectangle (pill, 7.0f);
+        g.setColour (juce::Colours::black);
+        g.setFont (uiFont (11.0f, true));
+        g.drawText (fem ? "F" : "M", pill, juce::Justification::centred);
+
+        g.setColour (Colours::textDim);
+        g.setFont (uiFont (14.0f, true));
+        g.drawText (juce::String::fromUTF8 ("\xc3\x97"), juce::Rectangle<float> (b.getRight() - 22.0f, b.getY(), 18.0f, b.getHeight()), juce::Justification::centred);
+
+        g.setColour (Colours::textDim);
+        g.setFont (uiFont (11.0f, true));
+        g.drawText (juce::String (i + 1), b.withWidth (22.0f), juce::Justification::centred);
+        g.setColour (Colours::text);
+        g.setFont (uiFont (12.5f));
+        g.drawFittedText (t.name, b.withTrimmedLeft (24.0f).withTrimmedRight (58.0f).toNearestInt(), juce::Justification::centredLeft, 1, 0.8f);
+    }
+    if ((int) takes.size() > visible)
+    {
+        g.setColour (Colours::textDim);
+        g.setFont (uiFont (10.0f));
+        g.drawText (juce::String (scroll + 1) + "-" + juce::String (juce::jmin ((int) takes.size(), scroll + visible)) + " of " + juce::String ((int) takes.size()) + "  (scroll)",
+                    juce::Rectangle<float> (14, r.getHeight() - 16, r.getWidth() - 28, 12), juce::Justification::centredRight);
+    }
+}
+
+void TakesPanel::mouseDown (const juce::MouseEvent& e)
+{
+    const auto& takes = proc.getTakes();
+    for (int row = 0; row < 12; ++row)
+    {
+        auto b = rowBounds (row);
+        if (! b.contains (e.position)) continue;
+        const int i = row + scroll;
+        if (i >= (int) takes.size()) return;
+        if (e.position.x > b.getRight() - 26.0f)       proc.removeTake (i);
+        else if (e.position.x > b.getRight() - 56.0f)  proc.toggleFemale (i);
+        repaint();
+        return;
+    }
+}
+
+void TakesPanel::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& w)
+{
+    scroll += w.deltaY < 0 ? 1 : -1;
+    repaint();
 }
 
 //==============================================================================
@@ -735,13 +823,13 @@ void RoomView::paint (juce::Graphics& g)
 
 //==============================================================================
 Content::Content (HordeProcessor& p)
-    : proc (p), field (p), meters (p), outMeter (p), room (p)
+    : proc (p), field (p), meters (p), takesPanel (p), outMeter (p), room (p)
 {
     setLookAndFeel (&lnf);
 
     addKnob ("voices", "VOICES", "1 - 100").big = true;
-    addKnob ("takes", "TAKES", "1 - 8").side = true;
-    addKnob ("maleTakes", "MALE TAKES", "0 - 8").side = true;
+    addKnob ("mix", "MIX", "files: phrase jumps").side = true;
+    addKnob ("maleTakes", "MALE INPUTS", "live input mode").side = true;
     addKnob ("delayMin", "DELAY MIN");
     addKnob ("delaySpread", "DELAY SPREAD");
     addKnob ("pitchSpread", "PITCH SPREAD");
@@ -755,6 +843,8 @@ Content::Content (HordeProcessor& p)
     addKnob ("room", "ROOM SIZE");
     addKnob ("dry", "DRY");
     addKnob ("wet", "WET").slider.getProperties().set ("bipolar", true);
+    addKnob ("scatter", "SCATTER");
+    addKnob ("loose", "LOOSE");
     knobs.front()->side = true;
 
     balanceAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "balance", balance);
@@ -790,6 +880,13 @@ Content::Content (HordeProcessor& p)
     addAndMakeVisible (logo);
     addAndMakeVisible (field);
     addAndMakeVisible (meters);
+    addChildComponent (takesPanel);
+
+    addButton.onClick = [this] { chooseFiles(); };
+    addButton.setTooltip ("Load take files (WAV/AIFF/FLAC/MP3). You can also drag them onto the plugin.");
+    addAndMakeVisible (addButton);
+    proc.onTakesChanged = [this] { updateMode(); takesPanel.repaint(); field.repaint(); };
+    updateMode();
     addAndMakeVisible (outMeter);
     addAndMakeVisible (room);
 
@@ -799,6 +896,7 @@ Content::Content (HordeProcessor& p)
 
 Content::~Content()
 {
+    proc.onTakesChanged = nullptr;
     stopTimer();
     setLookAndFeel (nullptr);
 }
@@ -815,6 +913,41 @@ Knob& Content::addKnob (const char* id, const char* label, const char* range)
     addAndMakeVisible (k->slider);
     knobs.push_back (std::move (k));
     return *knobs.back();
+}
+
+void Content::updateMode()
+{
+    const bool files = ! proc.getTakes().empty();
+    takesPanel.setVisible (files);
+    meters.setVisible (! files);
+}
+
+void Content::chooseFiles()
+{
+    chooser = std::make_unique<juce::FileChooser> ("Load take files", juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles
+                              | juce::FileBrowserComponent::canSelectMultipleItems,
+                          [this] (const juce::FileChooser& fc)
+                          {
+                              juce::StringArray paths;
+                              for (auto& f : fc.getResults()) paths.add (f.getFullPathName());
+                              if (! paths.isEmpty()) proc.addFiles (paths);
+                          });
+}
+
+bool Content::isInterestedInFileDrag (const juce::StringArray& files)
+{
+    for (auto& f : files)
+        if (juce::File (f).hasFileExtension ("wav;aif;aiff;flac;mp3;ogg"))
+            return true;
+    return false;
+}
+
+void Content::filesDropped (const juce::StringArray& files, int, int)
+{
+    dragOver = false;
+    proc.addFiles (files);
+    repaint();
 }
 
 void Content::reroll()
@@ -900,7 +1033,7 @@ void Content::paintOverChildren (juce::Graphics& g)
             g.drawText (k.label, block.removeFromTop (14.0f), juce::Justification::left);
             g.setColour (Colours::text);
             g.setFont (uiFont (bigH, true));
-            g.drawText (value.upToFirstOccurrenceOf (" ", false, false), block.removeFromTop (bigH), juce::Justification::left);
+            g.drawText (k.big ? value.upToFirstOccurrenceOf (" ", false, false) : value, block.removeFromTop (bigH), juce::Justification::left);
             g.setColour (Colours::textDim);
             g.setFont (uiFont (11.0f));
             g.drawText (k.range, block, juce::Justification::left);
@@ -914,6 +1047,17 @@ void Content::paintOverChildren (juce::Graphics& g)
             g.setFont (uiFont (13.5f, true));
             g.drawText (value, juce::Rectangle<float> (sb.getCentreX() - 50, sb.getBottom() + 1, 100, 16), juce::Justification::centred);
         }
+    }
+
+    if (dragOver)
+    {
+        auto b = getLocalBounds().toFloat().reduced (6.0f);
+        g.setColour (juce::Colours::black.withAlpha (0.55f));
+        g.fillRoundedRectangle (b, 12.0f);
+        g.setColour (Colours::ember);
+        g.drawRoundedRectangle (b, 12.0f, 2.0f);
+        g.setFont (uiFont (28.0f, true, 0.1f));
+        g.drawText ("DROP TAKES TO BUILD THE CROWD", b, juce::Justification::centred);
     }
 
     // balance caption
@@ -939,6 +1083,8 @@ void Content::resized()
 
     field.setBounds (244, 92, 580, 374);
     meters.setBounds (834, 92, 274, 214);
+    takesPanel.setBounds (834, 92, 274, 214);
+    addButton.setBounds (608, 30, 140, 36);
     room.setBounds (774, 476, 334, 214);
 
     // CROWD
@@ -947,9 +1093,11 @@ void Content::resized()
     knobs[2]->slider.setBounds (40, 324, 66, 66);    // male takes
     balance.setBounds (40, 436, 170, 20);
 
-    // TIME & PITCH: 4 in a row
-    for (int i = 0; i < 4; ++i)
-        knobs[(size_t) (3 + i)]->slider.setBounds (24 + i * 92, 568, 66, 66);
+    // TIME & PITCH: delay min / delay spread / scatter on top, pitch spread / drift / loose below
+    const int tp[2][3] = { { 3, 4, 16 }, { 5, 6, 17 } };
+    for (int row = 0; row < 2; ++row)
+        for (int i = 0; i < 3; ++i)
+            knobs[(size_t) tp[row][i]]->slider.setBounds (58 + i * 118, row == 0 ? 538 : 622, 44, 44);
 
     // COLOR & SPACE: 3 on top, 4 below
     for (int i = 0; i < 3; ++i)

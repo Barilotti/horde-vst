@@ -5,7 +5,7 @@ namespace horde
 void CrowdEngine::prepare (double sampleRate, int maxBlock)
 {
     sr = sampleRate;
-    const int needed = (int) (sr * 1.0) + maxBlock + 16; // 650 ms max delay+window, with headroom
+    const int needed = (int) (sr * 4.2) + maxBlock + 16; // delay + scatter + loose + window, with headroom
     ringSize = juce::nextPowerOfTwo (needed);
     ringMask = ringSize - 1;
     for (auto& r : rings)
@@ -23,10 +23,12 @@ void CrowdEngine::reset()
         std::fill (r.begin(), r.end(), 0.0f);
     writePos = 0;
     reverb.reset();
+    slotHold.fill (0);
+    for (auto& s : slotOn) s.store (false);
     for (auto& v : voices)
     {
         v.f1.reset(); v.f2.reset();
-        v.lp = 0; v.baseDelay = -1.0f; v.active = 0.0f;
+        v.lp = 0; v.baseDelay = -1.0f; v.prevDelay = -1.0f; v.active = 0.0f;
     }
 }
 
@@ -37,6 +39,7 @@ void CrowdEngine::reroll (int seed)
     for (auto& v : voices)
     {
         v.uDelay = master.nextFloat();
+        v.uScatter = master.nextFloat();
         v.uPitch = master.nextFloat();
         v.uPan   = master.nextFloat();
         v.uDist  = master.nextFloat();
@@ -47,6 +50,56 @@ void CrowdEngine::reroll (int seed)
         v.phase  = master.nextFloat();
         v.rng.setSeed (master.nextInt64());
     }
+}
+
+void CrowdEngine::resyncFiles (int seed, juce::int64 timeKey)
+{
+    // Same seed + same timeline position => the same crowd every time playback starts there.
+    for (int vi = 0; vi < kMaxVoices; ++vi)
+    {
+        auto& v = voices[(size_t) vi];
+        v.rng.setSeed ((juce::int64) seed * 1000003 + (juce::int64) vi * 7919 + timeKey * 31337);
+        v.pitchWander = {}; v.ampWander = {}; v.timeWander = {};
+        v.take.reset();
+        v.segEnv = 0.0f;
+        v.segRemaining = 0;
+    }
+}
+
+void CrowdEngine::newSegment (Voice& v, int, const Library& lib, float mix, bool firstOne)
+{
+    const int n = (int) lib.takes.size();
+    v.take = lib.takes[(size_t) v.rng.nextInt (n)];
+    const auto& t = *v.take;
+    const int len = t.audio.getNumSamples();
+
+    // pick a start point that actually has voice in it
+    double pos = 0.0;
+    for (int tries = 0; tries < 12; ++tries)
+    {
+        pos = (double) v.rng.nextFloat() * (double) juce::jmax (1, len - (int) (t.sampleRate * 0.5));
+        const size_t e = (size_t) juce::jlimit (0, (int) t.env.size() - 1, (int) (pos / t.hop));
+        if (t.env.empty() || t.env[e] > 0.12f)
+            break;
+    }
+    v.libPos = pos;
+
+    const float segSec = (12.0f - 10.5f * mix) * (0.6f + 0.8f * v.rng.nextFloat());
+    v.segRemaining = (int) (segSec * sr * (firstOne ? v.rng.nextFloat() : 1.0f));
+    v.segEnv = 0.0f;
+    v.f1.reset(); v.f2.reset(); v.lp = 0.0f;
+}
+
+static inline float readTake (const float* d, int len, double pos) noexcept
+{
+    const int i0 = (int) pos;
+    if (i0 < 1 || i0 >= len - 2) return 0.0f;
+    const float fr = (float) (pos - (double) i0);
+    const float xm1 = d[i0 - 1], x0 = d[i0], x1 = d[i0 + 1], x2 = d[i0 + 2];
+    const float c1 = 0.5f * (x1 - xm1);
+    const float c2 = xm1 - 2.5f * x0 + 2.0f * x1 - 0.5f * x2;
+    const float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
+    return ((c3 * fr + c2) * fr + c1) * fr + x0;
 }
 
 static inline float readInterp (const std::vector<float>& ring, int mask, float pos) noexcept
@@ -71,7 +124,7 @@ void CrowdEngine::process (const juce::AudioBuffer<float>& in, int numInputChann
     if (p.seed != currentSeed)
         reroll (p.seed);
 
-    const int takes = juce::jlimit (1, kMaxTakes, p.takes);
+    const int fixedTakes = juce::jlimit (0, kMaxTakes, p.takes);
     const int nIn   = juce::jmin (numInputChannels, kMaxTakes);
 
     // ---- 1. Write inputs into ring buffers, measure levels
@@ -93,6 +146,13 @@ void CrowdEngine::process (const juce::AudioBuffer<float>& in, int numInputChann
             for (int n = 0; n < numSamples; ++n)
                 ring[(size_t) ((writePos + n) & ringMask)] = 0.0f;
         }
+        // auto take detection: a channel counts as a take once it carries signal, held for 30 s
+        if (peak > 0.003f)
+            slotHold[(size_t) ch] = (int) (sr * 30.0);
+        else
+            slotHold[(size_t) ch] = juce::jmax (0, slotHold[(size_t) ch] - numSamples);
+        slotOn[(size_t) ch].store (slotHold[(size_t) ch] > 0);
+
         const float old = inLevels[(size_t) ch].load();
         inLevels[(size_t) ch].store (juce::jmax (peak, old * 0.85f));
     }
@@ -102,6 +162,29 @@ void CrowdEngine::process (const juce::AudioBuffer<float>& in, int numInputChann
     float* outR = out.getNumChannels() > 1 ? out.getWritePointer (1) : nullptr;
     for (int ch = 0; ch < out.getNumChannels(); ++ch)
         out.clear (ch, 0, numSamples);
+
+    // Which input channels feed voices
+    std::array<int, kMaxTakes> slotList {};
+    int nSlots = 0;
+    for (int ch = 0; ch < kMaxTakes; ++ch)
+        if (fixedTakes > 0 ? ch < fixedTakes : slotHold[(size_t) ch] > 0)
+            slotList[(size_t) nSlots++] = ch;
+    if (nSlots == 0)
+        slotList[(size_t) nSlots++] = 0;
+
+    // Files mode: voices play the loaded take files instead of the track inputs
+    const auto lib = std::atomic_load (&library);
+    const bool files = lib != nullptr && ! lib->takes.empty();
+    bool filesOn = true;
+    if (files && p.hasTransport)
+    {
+        filesOn = p.playing;
+        if (p.playing && (! wasPlaying || std::abs (p.timeInSamples - expectedTime) > (juce::int64) numSamples * 4))
+            resyncFiles (p.seed, p.timeInSamples / juce::jmax ((juce::int64) 1, (juce::int64) (sr * 0.25)));
+        wasPlaying = p.playing;
+        expectedTime = p.timeInSamples + numSamples;
+    }
+    const float segFade = 1.0f / (float) (0.04 * sr);
 
     sendBuf.clear();
     float* sL = sendBuf.getWritePointer (0);
@@ -120,19 +203,34 @@ void CrowdEngine::process (const juce::AudioBuffer<float>& in, int numInputChann
     for (int vi = 0; vi < kMaxVoices; ++vi)
     {
         auto& v = voices[(size_t) vi];
-        const bool wantOn = vi < nVoices;
+        // Distribute voices across takes: interleave so every take gets used evenly.
+        // If the take assignment changes, fade the voice out first, then move it.
+        if (files)
+        {
+            bool known = false;
+            if (v.take != nullptr)
+                for (auto& t : lib->takes)
+                    if (t == v.take) { known = true; break; }
+            if (! known)
+                newSegment (v, vi, *lib, p.mix, true);
+        }
+        const int desiredSlot = files ? v.slot : slotList[(size_t) (vi % nSlots)];
+        if (desiredSlot != v.slot && v.active <= 0.0f)
+        {
+            v.slot = desiredSlot;
+            v.f1.reset(); v.f2.reset(); v.lp = 0.0f;
+        }
+        const bool wantOn = vi < nVoices && desiredSlot == v.slot && (! files || filesOn);
         if (! wantOn && v.active <= 0.0f)
         {
             v.vizOn.store (false);
             continue;
         }
-
-        // Distribute voices across takes: interleave so every take gets used evenly.
-        v.slot   = vi % takes;
-        v.female = v.slot >= p.maleTakes;
+        v.female = files ? v.take->female.load() : v.slot >= p.maleTakes;
         const float genderGain = v.female ? femaleGain : maleGain;
 
-        const float targetDelay = (float) ((p.delayMinMs + v.uDelay * p.delaySpreadMs) * 0.001 * sr);
+        const float targetDelay = (float) ((p.delayMinMs + v.uDelay * p.delaySpreadMs + v.uScatter * p.scatterMs) * 0.001 * sr);
+        const float looseAmp    = (float) (p.loose * 0.2 * sr);   // up to 200 ms of tempo wander
         if (v.baseDelay < 0.0f)
             v.baseDelay = targetDelay;
 
@@ -156,19 +254,61 @@ void CrowdEngine::process (const juce::AudioBuffer<float>& in, int numInputChann
         const float gainBase = distGain * genderGain * norm;
 
         float energy = 0.0f, phaseInc = 0.0f, amp = 1.0f;
+        double fileRate = 1.0;
 
         for (int n = 0; n < numSamples; ++n)
         {
             v.active = juce::jlimit (0.0f, 1.0f, v.active + (wantOn ? fadeStep : -fadeStep));
             v.baseDelay += (targetDelay - v.baseDelay) * delaySmooth;
+            const float tw = v.timeWander.next (v.rng, sr, 2.0f, 6.0f);
+            const float totalDelay = v.baseDelay + looseAmp * 0.5f * (tw + 1.0f);
+            if (v.prevDelay < 0.0f) v.prevDelay = totalDelay;
+            const float slope = totalDelay - v.prevDelay;   // >0: falling behind (slower), <0: catching up
+            v.prevDelay = totalDelay;
 
             // modulation is slow: update the expensive parts every 8 samples
             const float pw = v.pitchWander.next (v.rng, sr, 0.4f, 1.8f);
             const float aw = v.ampWander.next (v.rng, sr, 0.15f, 0.9f);
+            if (files)
+            {
+                // ---- files mode: read the take directly, jump to another take/phrase now and then
+                const int len = v.take->audio.getNumSamples();
+                if (v.segRemaining <= 0 || v.libPos >= (double) (len - 4))
+                {
+                    v.segEnv -= segFade;
+                    if (v.segEnv <= 0.0f)
+                        newSegment (v, vi, *lib, p.mix, false);
+                }
+                else
+                {
+                    v.segEnv = juce::jmin (1.0f, v.segEnv + segFade);
+                    --v.segRemaining;
+                }
+                if ((n & 7) == 0)
+                {
+                    fileRate = std::exp2 ((baseCents + p.drift * pw) * (1.0f / 1200.0f)) * v.take->sampleRate / sr;
+                    amp = std::exp (p.humanize * 0.7f * aw);
+                }
+                float x = readTake (v.take->audio.getReadPointer (0), v.take->audio.getNumSamples(), v.libPos) * v.segEnv;
+                v.libPos += fileRate;
+
+                x = v.f1.process (x);
+                x = v.f2.process (x);
+                v.lp += lpA * (x - v.lp);
+                x = v.lp * gainBase * amp * v.active;
+                energy += x * x;
+                outL[n] += x * gL;
+                if (outR) outR[n] += x * gR;
+                sL[n] += x * gL * send;
+                sR[n] += x * gR * send;
+                continue;
+            }
+
             if ((n & 7) == 0)
             {
                 const float cents = baseCents + p.drift * pw;
-                phaseInc = (1.0f - std::exp2 (cents * (1.0f / 1200.0f))) / W;
+                // read speed = shifterRatio - slope; choose shifterRatio so pitch stays at target
+                phaseInc = (1.0f - (std::exp2 (cents * (1.0f / 1200.0f)) + slope)) / W;
                 amp = std::exp (p.humanize * 0.7f * aw);
             }
             v.phase += phaseInc;
@@ -181,8 +321,8 @@ void CrowdEngine::process (const juce::AudioBuffer<float>& in, int numInputChann
             const float wB = std::sin (juce::MathConstants<float>::pi * phB);
 
             const float now = (float) (writePos + n);
-            float posA = now - (v.baseDelay + v.phase * W);
-            float posB = now - (v.baseDelay + phB * W);
+            float posA = now - (totalDelay + v.phase * W);
+            float posB = now - (totalDelay + phB * W);
             if (posA < 0.0f) posA += ringF;
             if (posB < 0.0f) posB += ringF;
 
@@ -230,14 +370,13 @@ void CrowdEngine::process (const juce::AudioBuffer<float>& in, int numInputChann
 
     // ---- 5. Output = dry (sum of used takes, centered) + (voices + reverb) * wet gain
     const float wetTarget = juce::Decibels::decibelsToGain (p.wetDb);
-    const int   used = juce::jmin (takes, nIn);
-    const float dryG = p.dry / std::sqrt ((float) juce::jmax (1, used));
+    const float dryG = p.dry / std::sqrt ((float) nSlots);
     for (int n = 0; n < numSamples; ++n)
     {
         wetGainSmoothed += (wetTarget - wetGainSmoothed) * 0.002f;
         float s = 0.0f;
-        for (int ch = 0; ch < used; ++ch)
-            s += rings[(size_t) ch][(size_t) ((writePos + n) & ringMask)];
+        for (int k = 0; k < nSlots; ++k)
+            s += rings[(size_t) slotList[(size_t) k]][(size_t) ((writePos + n) & ringMask)];
         const float d = s * dryG * 0.7071f;
         outL[n] = d + (outL[n] + sL[n]) * wetGainSmoothed;
         if (outR) outR[n] = d + (outR[n] + sR[n]) * wetGainSmoothed;

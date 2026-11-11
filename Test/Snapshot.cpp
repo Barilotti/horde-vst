@@ -18,6 +18,11 @@ int main (int argc, char** argv)
     proc.setBusesLayout (layout);
     proc.apvts.getParameter ("voices")->setValueNotifyingHost (proc.apvts.getParameter ("voices")->convertTo0to1 (48.0f));
     proc.apvts.getParameter ("seed")->setValueNotifyingHost (proc.apvts.getParameter ("seed")->convertTo0to1 (4827.0f));
+    {
+        juce::StringArray paths;
+        for (int i = 4; i < argc; ++i) paths.add (juce::File::getCurrentWorkingDirectory().getChildFile (argv[i]).getFullPathName());
+        if (! paths.isEmpty()) proc.addFiles (paths);
+    }
     proc.prepareToPlay (rd->sampleRate, 512);
 
     std::atomic<bool> run { true };
