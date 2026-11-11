@@ -42,7 +42,7 @@ public:
     void paint (juce::Graphics&) override;
 };
 
-class Battlefield : public juce::Component
+class Battlefield : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     explicit Battlefield (const HordeProcessor& p) : proc (p) {}
@@ -54,7 +54,7 @@ private:
     std::array<float, horde::kMaxVoices> fade {};
 };
 
-class InputMeters : public juce::Component
+class InputMeters : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     explicit InputMeters (HordeProcessor& p) : proc (p) {}
@@ -76,7 +76,7 @@ private:
     std::array<float, 2> lv {};
 };
 
-class TakesPanel : public juce::Component
+class TakesPanel : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     explicit TakesPanel (HordeProcessor& p) : proc (p) {}
@@ -89,7 +89,7 @@ private:
     int scroll = 0;
 };
 
-class RoomView : public juce::Component
+class RoomView : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     explicit RoomView (HordeProcessor& p);
@@ -158,8 +158,10 @@ private:
     juce::TextButton rerollButton { "REROLL" };
     juce::Label seedValue;
     juce::TextButton addButton { "+ ADD TAKES" };
+    juce::TextButton linkButton { "LINK TRACKS" };
     std::unique_ptr<juce::FileChooser> chooser;
     bool dragOver = false;
+    juce::TooltipWindow tooltips { this, 450 };
 };
 } // namespace horde::ui
 

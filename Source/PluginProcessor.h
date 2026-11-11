@@ -3,6 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "CrowdEngine.h"
+#include "ReaperBridge.h"
 
 class HordeProcessor : public juce::AudioProcessor
 {
@@ -44,10 +45,16 @@ public:
     const std::vector<std::shared_ptr<horde::Take>>& getTakes() const { return takes; }
     std::function<void()> onTakesChanged;
 
+    // ---- REAPER integration
+    juce::VST3ClientExtensions* getVST3ClientExtensions() override { return &reaperBridge; }
+    ReaperBridge::Result linkChildTracks();
+    bool inReaper() const { return reaperBridge.available(); }
+
 private:
     horde::CrowdEngine engine;
     std::atomic<int> numInputsSeen { 0 };
     std::vector<std::shared_ptr<horde::Take>> takes;
+    ReaperBridge reaperBridge;
     juce::AudioFormatManager formats;
     void publishTakes();
 

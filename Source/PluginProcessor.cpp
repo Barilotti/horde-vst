@@ -186,6 +186,23 @@ void HordeProcessor::addFiles (const juce::StringArray& paths)
     publishTakes();
 }
 
+ReaperBridge::Result HordeProcessor::linkChildTracks()
+{
+    auto r = reaperBridge.linkChildTracks();
+    if (r.ok)
+    {
+        if (auto* prm = apvts.getParameter ("maleTakes"))
+        {
+            prm->beginChangeGesture();
+            prm->setValueNotifyingHost (prm->convertTo0to1 ((float) juce::jmin (r.males, horde::kMaxTakes)));
+            prm->endChangeGesture();
+        }
+        if (auto* prm = apvts.getParameter ("takes"))
+            prm->setValueNotifyingHost (prm->convertTo0to1 (0.0f)); // Auto
+    }
+    return r;
+}
+
 void HordeProcessor::removeTake (int index)
 {
     if (juce::isPositiveAndBelow (index, (int) takes.size()))

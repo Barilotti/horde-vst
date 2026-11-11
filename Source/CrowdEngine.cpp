@@ -1,4 +1,5 @@
 #include "CrowdEngine.h"
+#include <limits>
 
 namespace horde
 {
@@ -29,6 +30,7 @@ void CrowdEngine::reset()
     {
         v.f1.reset(); v.f2.reset();
         v.lp = 0; v.baseDelay = -1.0f; v.prevDelay = -1.0f; v.active = 0.0f;
+        v.segEnv = 0.0f; v.segRemaining = 0;
     }
 }
 
@@ -214,13 +216,18 @@ void CrowdEngine::process (const juce::AudioBuffer<float>& in, int numInputChann
             if (! known)
                 newSegment (v, vi, *lib, p.mix, true);
         }
-        const int desiredSlot = files ? v.slot : slotList[(size_t) (vi % nSlots)];
-        if (desiredSlot != v.slot && v.active <= 0.0f)
+        else
         {
-            v.slot = desiredSlot;
-            v.f1.reset(); v.f2.reset(); v.lp = 0.0f;
+            // live mode: a voice whose input went away jumps to another take
+            bool known = false;
+            for (int k = 0; k < nSlots; ++k)
+                known |= slotList[(size_t) k] == v.slot;
+            if (! known)
+                v.segRemaining = 0;
         }
-        const bool wantOn = vi < nVoices && desiredSlot == v.slot && (! files || filesOn);
+        if (! files && p.mix > 0.001f && v.segRemaining == std::numeric_limits<int>::max())
+            v.segRemaining = (int) (v.rng.nextFloat() * sr * 3.0);
+        const bool wantOn = vi < nVoices && (! files || filesOn);
         if (! wantOn && v.active <= 0.0f)
         {
             v.vizOn.store (false);
@@ -229,7 +236,7 @@ void CrowdEngine::process (const juce::AudioBuffer<float>& in, int numInputChann
         v.female = files ? v.take->female.load() : v.slot >= p.maleTakes;
         const float genderGain = v.female ? femaleGain : maleGain;
 
-        const float targetDelay = (float) ((p.delayMinMs + v.uDelay * p.delaySpreadMs + v.uScatter * p.scatterMs) * 0.001 * sr);
+        float targetDelay = (float) ((p.delayMinMs + v.uDelay * p.delaySpreadMs + v.uScatter * p.scatterMs) * 0.001 * sr);
         const float looseAmp    = (float) (p.loose * 0.2 * sr);   // up to 200 ms of tempo wander
         if (v.baseDelay < 0.0f)
             v.baseDelay = targetDelay;
@@ -250,7 +257,7 @@ void CrowdEngine::process (const juce::AudioBuffer<float>& in, int numInputChann
         v.f2.setPeak (sr, fShift * (1100.0 * std::pow (3600.0 / 1100.0, (double) v.uF2)), 1.6, p.timbre * 9.0 * (v.uG2 * 2.0 - 1.0));
 
         const float baseCents = p.pitchSpread * (v.uPitch * 2.0f - 1.0f);
-        const auto& ring = rings[(size_t) v.slot];
+        const std::vector<float>* ring = &rings[(size_t) v.slot];
         const float gainBase = distGain * genderGain * norm;
 
         float energy = 0.0f, phaseInc = 0.0f, amp = 1.0f;
@@ -259,6 +266,45 @@ void CrowdEngine::process (const juce::AudioBuffer<float>& in, int numInputChann
         for (int n = 0; n < numSamples; ++n)
         {
             v.active = juce::jlimit (0.0f, 1.0f, v.active + (wantOn ? fadeStep : -fadeStep));
+
+            if (! files)
+            {
+                // ---- live mode take mixing: every few seconds fade out, jump to another take
+                // and another moment in its recent past, fade back in
+                if (v.segRemaining <= 0)
+                {
+                    v.segEnv -= segFade;
+                    if (v.segEnv <= 0.0f)
+                    {
+                        const bool firstOne = v.active <= fadeStep * 2.0f;
+                        v.segEnv = 0.0f;
+                        v.slot = slotList[(size_t) v.rng.nextInt (nSlots)];
+                        ring = &rings[(size_t) v.slot];
+                        if (p.mix > 0.001f)
+                        {
+                            v.uScatter = v.rng.nextFloat();
+                            v.uDelay   = v.rng.nextFloat();
+                            const float segSec = (12.0f - 10.5f * p.mix) * (0.6f + 0.8f * v.rng.nextFloat());
+                            v.segRemaining = juce::jmax (1, (int) (segSec * sr * (firstOne ? v.rng.nextFloat() : 1.0f)));
+                        }
+                        else
+                        {
+                            v.segRemaining = std::numeric_limits<int>::max();
+                        }
+                        targetDelay = (float) ((p.delayMinMs + v.uDelay * p.delaySpreadMs + v.uScatter * p.scatterMs) * 0.001 * sr);
+                        v.baseDelay = targetDelay;
+                        v.prevDelay = -1.0f;
+                        v.f1.reset(); v.f2.reset(); v.lp = 0.0f;
+                    }
+                }
+                else
+                {
+                    v.segEnv = juce::jmin (1.0f, v.segEnv + segFade);
+                    if (v.segRemaining != std::numeric_limits<int>::max())
+                        --v.segRemaining;
+                }
+            }
+
             v.baseDelay += (targetDelay - v.baseDelay) * delaySmooth;
             const float tw = v.timeWander.next (v.rng, sr, 2.0f, 6.0f);
             const float totalDelay = v.baseDelay + looseAmp * 0.5f * (tw + 1.0f);
@@ -326,8 +372,8 @@ void CrowdEngine::process (const juce::AudioBuffer<float>& in, int numInputChann
             if (posA < 0.0f) posA += ringF;
             if (posB < 0.0f) posB += ringF;
 
-            float x = wA * wA * readInterp (ring, ringMask, posA)
-                    + wB * wB * readInterp (ring, ringMask, posB);
+            float x = (wA * wA * readInterp (*ring, ringMask, posA)
+                     + wB * wB * readInterp (*ring, ringMask, posB)) * v.segEnv;
 
             x = v.f1.process (x);
             x = v.f2.process (x);

@@ -37,7 +37,8 @@ juce_add_plugin(HORDE
 target_sources(HORDE PRIVATE
   Source/CrowdEngine.cpp
   Source/PluginProcessor.cpp
-  Source/PluginEditor.cpp)
+  Source/PluginEditor.cpp
+  Source/ReaperBridge.cpp)
 
 target_compile_definitions(HORDE PUBLIC
   JUCE_WEB_BROWSER=0
@@ -53,13 +54,13 @@ target_link_libraries(HORDE
 option(HORDE_BUILD_TESTS "Build offline render test tool" OFF)
 if(HORDE_BUILD_TESTS)
   juce_add_console_app(HordeRender)
-  target_sources(HordeRender PRIVATE Test/Render.cpp Source/CrowdEngine.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)
+  target_sources(HordeRender PRIVATE Test/Render.cpp Source/CrowdEngine.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp Source/ReaperBridge.cpp)
   target_compile_definitions(HordeRender PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JucePlugin_Name="HORDE" JUCE_MODAL_LOOPS_PERMITTED=1)
   target_link_libraries(HordeRender PRIVATE juce::juce_audio_utils juce::juce_dsp juce::juce_recommended_config_flags)
 endif()
 if(HORDE_BUILD_TESTS)
   juce_add_gui_app(HordeSnapshot)
-  target_sources(HordeSnapshot PRIVATE Test/Snapshot.cpp Source/CrowdEngine.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)
+  target_sources(HordeSnapshot PRIVATE Test/Snapshot.cpp Source/CrowdEngine.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp Source/ReaperBridge.cpp)
   target_compile_definitions(HordeSnapshot PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JucePlugin_Name="HORDE" JUCE_MODAL_LOOPS_PERMITTED=1)
   target_link_libraries(HordeSnapshot PRIVATE juce::juce_audio_utils juce::juce_dsp juce::juce_recommended_config_flags)
 endif()

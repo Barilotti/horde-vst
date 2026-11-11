@@ -108,6 +108,9 @@ juce::Path listenerPath (float k)
 LookAndFeel::LookAndFeel()
 {
     setDefaultSansSerifTypefaceName (uiSans());
+    setColour (juce::TooltipWindow::backgroundColourId, juce::Colour (0xf01a1414));
+    setColour (juce::TooltipWindow::textColourId, Colours::text);
+    setColour (juce::TooltipWindow::outlineColourId, Colours::red.withAlpha (0.6f));
     setColour (juce::Label::textColourId, Colours::text);
     setColour (juce::TextButton::textColourOffId, Colours::text);
     setColour (juce::TextButton::textColourOnId, Colours::text);
@@ -849,6 +852,7 @@ Content::Content (HordeProcessor& p)
 
     balanceAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "balance", balance);
     balance.setDoubleClickReturnValue (true, 0.0);
+    balance.setTooltip (juce::String::fromUTF8 ("Баланс мужских и женских голосов в миксе толпы."));
     balance.onValueChange = [this] { repaint(); };
     addAndMakeVisible (balance);
 
@@ -858,7 +862,7 @@ Content::Content (HordeProcessor& p)
                { "OUTPUT", Icon::output, { 834, 314, 274, 152 } } };
 
     rerollButton.onClick = [this] { reroll(); };
-    rerollButton.setTooltip ("Re-randomize every voice (delay, pitch, timbre, position)");
+    rerollButton.setTooltip (juce::String::fromUTF8 ("Перебросить все случайности: новая толпа (у каждого голоса новые задержка, высота, тембр и место). Номер варианта сохраняется в Seed, двойной клик по нему позволяет ввести номер."));
     addAndMakeVisible (rerollButton);
 
     seedValue.setEditable (false, true);
@@ -881,10 +885,23 @@ Content::Content (HordeProcessor& p)
     addAndMakeVisible (field);
     addAndMakeVisible (meters);
     addChildComponent (takesPanel);
+    takesPanel.setTooltip (juce::String::fromUTF8 ("Загруженные файлы дублей. Клик по M/F меняет пол, крестик убирает файл. Пока здесь есть файлы, плагин играет их (вход дорожки не используется)."));
+    meters.setTooltip (juce::String::fromUTF8 ("Уровни на входах 1–8 (живой режим). Подключённые входы определяются автоматически. M/F показывает пол входа."));
+    field.setTooltip (juce::String::fromUTF8 ("Толпа сверху: вы внизу, каждая точка = голос. Слева/справа = панорама, выше = дальше. Яркость = насколько громко голос звучит сейчас."));
+    room.setTooltip (juce::String::fromUTF8 ("Тип пространства для реверба: Field (открытое поле), Courtyard (двор крепости), Hall (зал), Cathedral (собор)."));
 
     addButton.onClick = [this] { chooseFiles(); };
-    addButton.setTooltip ("Load take files (WAV/AIFF/FLAC/MP3). You can also drag them onto the plugin.");
+    addButton.setTooltip (juce::String::fromUTF8 ("Загрузить файлы дублей (WAV/AIFF/FLAC/MP3) прямо в плагин. Их можно и просто перетащить в окно."));
     addAndMakeVisible (addButton);
+
+    linkButton.setTooltip (juce::String::fromUTF8 ("REAPER: подключить дорожки с дублями, которые лежат внутри этой папки, к входам HORDE. Нажимайте ещё раз после добавления дорожек."));
+    linkButton.onClick = [this]
+    {
+        const auto r = proc.linkChildTracks();
+        juce::AlertWindow::showMessageBoxAsync (r.ok ? juce::MessageBoxIconType::InfoIcon : juce::MessageBoxIconType::WarningIcon,
+                                                "HORDE", r.message, "OK", this);
+    };
+    addAndMakeVisible (linkButton);
     proc.onTakesChanged = [this] { updateMode(); takesPanel.repaint(); field.repaint(); };
     updateMode();
     addAndMakeVisible (outMeter);
@@ -901,6 +918,33 @@ Content::~Content()
     setLookAndFeel (nullptr);
 }
 
+static juce::String tooltipFor (const juce::String& id)
+{
+    static const std::pair<const char*, const char*> table[] = {
+        { "voices", "Сколько голосов в толпе (1–100). Больше голосов = гуще толпа. 100 голосов грузят примерно 30% одного ядра." },
+        { "mix", "Как часто голоса перескакивают на другой дубль и другую фразу. 0% = каждый голос держится за свой дубль, 100% = прыгают каждые 1–2 секунды. Главная ручка против эффекта «одно и то же с дилеем»." },
+        { "maleTakes", "Сколько первых входов (дорожек) считаются мужскими, остальные женские. LINK TRACKS выставляет это сам по названиям дорожек." },
+        { "delayMin", "Минимальная задержка любого голоса. Никто в толпе не кричит раньше этого времени." },
+        { "delaySpread", "Небольшой разброс задержек между голосами (до 0,5 с): толпа реагирует не идеально синхронно." },
+        { "scatter", "Большой разброс во времени (до 3 с): голоса кричат разные куски фраз в разный момент, слова перестают совпадать. Для синхронного крика под картинку держите низко." },
+        { "pitchSpread", "Насколько отличается высота голосов друг от друга (в центах, 100 ct = полтона). Делает голоса разными людьми." },
+        { "drift", "Медленное «плавание» высоты у каждого голоса, как у живого человека, который орёт." },
+        { "loose", "Каждый голос то чуть отстаёт, то догоняет по темпу (высота при этом не меняется). Убирает механическую ровность." },
+        { "timbre", "Разная окраска тембра у голосов (у одного гуще низ, у другого резче середина). Помогает, когда дублей мало." },
+        { "humanize", "Случайные «качели» громкости у каждого голоса: кто-то орёт громче, кто-то затихает." },
+        { "distance", "Средняя дальность толпы. Дальше = тише, глуше и больше реверба." },
+        { "depthSpread", "Разброс по глубине: 0% = все на одном расстоянии, 100% = кто-то прямо рядом, кто-то далеко." },
+        { "width", "Ширина толпы в стерео. 0% = все в центре." },
+        { "reverb", "Сколько общего реверба (пространства) у толпы. Дальние голоса получают его больше." },
+        { "room", "Размер выбранного пространства (Field / Courtyard / Hall / Cathedral, выбирается справа внизу)." },
+        { "dry", "Подмешать исходные дубли без обработки, по центру." },
+        { "wet", "Громкость толпы." },
+    };
+    for (auto& [k, v] : table)
+        if (id == k) return juce::String::fromUTF8 (v);
+    return {};
+}
+
 Knob& Content::addKnob (const char* id, const char* label, const char* range)
 {
     auto k = std::make_unique<Knob>();
@@ -910,6 +954,7 @@ Knob& Content::addKnob (const char* id, const char* label, const char* range)
         k->slider.setDoubleClickReturnValue (true, param->convertFrom0to1 (param->getDefaultValue()));
     k->slider.setPopupDisplayEnabled (false, false, nullptr);
     k->slider.onValueChange = [this] { repaint(); };
+    k->slider.setTooltip (tooltipFor (id));
     addAndMakeVisible (k->slider);
     knobs.push_back (std::move (k));
     return *knobs.back();
@@ -1085,6 +1130,7 @@ void Content::resized()
     meters.setBounds (834, 92, 274, 214);
     takesPanel.setBounds (834, 92, 274, 214);
     addButton.setBounds (608, 30, 140, 36);
+    linkButton.setBounds (758, 30, 140, 36);
     room.setBounds (774, 476, 334, 214);
 
     // CROWD
