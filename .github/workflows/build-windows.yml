@@ -20,4 +20,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: HORDE-VST3-Windows-x64
-          path: build/HORDE_artefacts/Release/VST3/HORDE.vst3
+          path: build/HORDE_artefacts/Release/VST3/
