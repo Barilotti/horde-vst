@@ -159,6 +159,8 @@ private:
     juce::Label seedValue;
     juce::TextButton addButton { "+ ADD TAKES" };
     juce::TextButton linkButton { "LINK TRACKS" };
+    juce::TextButton captureButton { "CAPTURE" };
+    int blink = 0;
     std::unique_ptr<juce::FileChooser> chooser;
     bool dragOver = false;
     juce::TooltipWindow tooltips { this, 450 };

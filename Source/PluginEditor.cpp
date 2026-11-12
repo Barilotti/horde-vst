@@ -241,7 +241,7 @@ void LookAndFeel::drawButtonText (juce::Graphics& g, juce::TextButton& b, bool o
         g.drawText (b.getButtonText(), r.withTrimmedLeft (36.0f), juce::Justification::centredLeft);
         return;
     }
-    g.setColour (over ? Colours::text : Colours::textDim);
+    g.setColour (b.findColour (juce::TextButton::textColourOffId).withMultipliedAlpha (over ? 1.0f : 0.75f));
     g.setFont (uiFont (14.0f, true));
     g.drawText (b.getButtonText(), r, juce::Justification::centred);
 }
@@ -902,6 +902,17 @@ Content::Content (HordeProcessor& p)
                                                 "HORDE", r.message, "OK", this);
     };
     addAndMakeVisible (linkButton);
+
+    captureButton.setTooltip (juce::String::fromUTF8 (
+        "Работает в любой DAW. Нажмите CAPTURE, затем Play: HORDE запишет дубли, которые приходят на его вход "
+        "(каждый канал отдельно), пока идёт воспроизведение. Stop (или ещё раз CAPTURE) = готово: дубли появятся в списке "
+        "и сохранятся внутри проекта. Во время записи звук проходит насквозь."));
+    captureButton.onClick = [this] { proc.toggleCapture(); };
+    addAndMakeVisible (captureButton);
+    proc.onCaptureFinished = [this] (const juce::String& msg)
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "HORDE", msg, "OK", this);
+    };
     proc.onTakesChanged = [this] { updateMode(); takesPanel.repaint(); field.repaint(); };
     updateMode();
     addAndMakeVisible (outMeter);
@@ -914,6 +925,7 @@ Content::Content (HordeProcessor& p)
 Content::~Content()
 {
     proc.onTakesChanged = nullptr;
+    proc.onCaptureFinished = nullptr;
     stopTimer();
     setLookAndFeel (nullptr);
 }
@@ -1015,6 +1027,22 @@ void Content::timerCallback()
     meters.tick();
     outMeter.tick();
     room.tick();
+    {
+        ++blink;
+        const auto st = proc.getCaptureState();
+        juce::String txt = "CAPTURE";
+        if (st == HordeProcessor::CaptureState::armed)
+            txt = (blink / 8) % 2 ? juce::String::fromUTF8 ("\xe2\x97\x8f PRESS PLAY") : juce::String ("PRESS PLAY");
+        else if (st == HordeProcessor::CaptureState::recording)
+        {
+            const int sec = (int) proc.getCapturedSeconds();
+            txt = juce::String::fromUTF8 ("\xe2\x97\x8f REC ") + juce::String (sec / 60) + ":" + juce::String (sec % 60).paddedLeft ('0', 2);
+        }
+        if (captureButton.getButtonText() != txt)
+            captureButton.setButtonText (txt);
+        captureButton.setColour (juce::TextButton::textColourOffId,
+                                 st == HordeProcessor::CaptureState::idle ? Colours::text : Colours::red.brighter (0.3f));
+    }
     if (! seedValue.isBeingEdited())
         seedValue.setText (juce::String ((int) proc.apvts.getRawParameterValue ("seed")->load()), juce::dontSendNotification);
 }
@@ -1045,7 +1073,7 @@ void Content::paint (juce::Graphics& g)
 
     g.setColour (Colours::textDim.withAlpha (0.6f));
     g.setFont (uiFont (11.0f, false, 0.2f));
-    g.drawText ("v0.1  PROTOTYPE", juce::Rectangle<float> (900, 34, 200, 28), juce::Justification::centredRight);
+    g.drawText ("v0.5", juce::Rectangle<float> (1050, 34, 56, 28), juce::Justification::centredRight);
 
     for (auto& pnl : panels)
     {
@@ -1130,7 +1158,16 @@ void Content::resized()
     meters.setBounds (834, 92, 274, 214);
     takesPanel.setBounds (834, 92, 274, 214);
     addButton.setBounds (608, 30, 140, 36);
-    linkButton.setBounds (758, 30, 140, 36);
+    if (proc.inReaper())
+    {
+        linkButton.setBounds (758, 30, 140, 36);
+        captureButton.setBounds (908, 30, 140, 36);
+    }
+    else
+    {
+        linkButton.setVisible (false);
+        captureButton.setBounds (758, 30, 140, 36);
+    }
     room.setBounds (774, 476, 334, 214);
 
     // CROWD

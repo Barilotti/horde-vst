@@ -5,10 +5,11 @@
 #include "CrowdEngine.h"
 #include "ReaperBridge.h"
 
-class HordeProcessor : public juce::AudioProcessor, private juce::AsyncUpdater
+class HordeProcessor : public juce::AudioProcessor, private juce::AsyncUpdater, private juce::Timer
 {
 public:
     HordeProcessor();
+    ~HordeProcessor() override { stopTimer(); freeCaptureChunks(); }
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -50,6 +51,14 @@ public:
     ReaperBridge::Result linkChildTracks();
     bool inReaper() const { return reaperBridge.available(); }
 
+    // ---- CAPTURE: record the takes from the plugin input during one playback pass (any DAW)
+    enum class CaptureState { idle, armed, recording };
+    void toggleCapture();
+    CaptureState getCaptureState() const;
+    double getCapturedSeconds() const { return (double) capLen.load() / juce::jmax (1.0, getSampleRate()); }
+    juce::String lastCaptureMessage;
+    std::function<void (const juce::String&)> onCaptureFinished;
+
 private:
     horde::CrowdEngine engine;
     std::atomic<int> numInputsSeen { 0 };
@@ -61,6 +70,17 @@ private:
     static std::shared_ptr<horde::Take> makeTake (const juce::AudioBuffer<float>&, double sampleRate,
                                                   const juce::String& name, const juce::String& path, bool female);
     bool linkedToTracks = false;
+
+    void timerCallback() override;
+    void finishCapture();
+    static constexpr int kCapChunk = 65536;
+    static constexpr int kCapMaxChunks = 1024;           // ~23 min at 48 kHz
+    struct CapChannel { std::array<std::atomic<float*>, kCapMaxChunks> chunks {}; };
+    std::array<CapChannel, horde::kMaxTakes> cap;
+    std::atomic<int>  capLen { 0 }, capChannels { 0 };
+    std::atomic<bool> capArmed { false }, capRecording { false }, capStopRequest { false }, capDone { false };
+    double capSampleRate = 48000.0;
+    void freeCaptureChunks();
 
     struct Raw
     {

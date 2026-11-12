@@ -16,6 +16,8 @@ int main (int argc, char** argv)
     if (argc < 3) { std::puts ("usage: see source"); return 1; }
     juce::AudioFormatManager fm; fm.registerBasicFormats();
     const bool files = juce::String (argv[1]) == "--files";
+    const bool capture = juce::String (argv[1]) == "--capture";   // --capture in.wav out.wav voices
+    if (capture) { argv[1] = argv[2]; argv[2] = argv[3]; }
 
     HordeProcessor proc;
     auto layout = proc.getBusesLayout();
@@ -40,11 +42,34 @@ int main (int argc, char** argv)
         sr = rd->sampleRate; nIn = (int) rd->numChannels; len = (int) rd->lengthInSamples + (int) (sr * 3);
         src.setSize (nIn, len); src.clear();
         rd->read (&src, 0, (int) rd->lengthInSamples, 0, true, true);
-        if (argc > 3) setP (proc, "voices", (float) std::atoi (argv[3]));
+        if (argc > 3 && ! capture) setP (proc, "voices", (float) std::atoi (argv[3]));
     }
     proc.prepareToPlay (sr, 256);
 
     juce::AudioBuffer<float> out (2, len), blk (8, 256); juce::MidiBuffer midi;
+    if (capture)
+    {
+        proc.toggleCapture();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
+        for (int pos = 0; pos < len; pos += 256)
+        {
+            const int n = juce::jmin (256, len - pos);
+            blk.setSize (8, n, false, false, true); blk.clear();
+            for (int c = 0; c < nIn; ++c) blk.copyFrom (c, 0, src, c, pos, n);
+            proc.processBlock (blk, midi);
+            if (pos % 48000 == 0) juce::MessageManager::getInstance()->runDispatchLoopUntil (120);
+        }
+        proc.toggleCapture();
+        proc.processBlock (blk, midi);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (500);
+        std::printf ("%s\ntakes now: %d\n", proc.lastCaptureMessage.toRawUTF8(), (int) proc.getTakes().size());
+        src.clear(); len = (int) (sr * 20); out.setSize (2, len); src.setSize (nIn, len);  src.clear();
+        // state round-trip
+        juce::MemoryBlock st; proc.getStateInformation (st);
+        std::printf ("state size %d KB\n", (int) st.getSize() / 1024);
+        proc.setStateInformation (st.getData(), (int) st.getSize());
+        std::printf ("takes after reload: %d\n", (int) proc.getTakes().size());
+    }
     for (int pos = 0; pos < len; pos += 256)
     {
         const int n = juce::jmin (256, len - pos);

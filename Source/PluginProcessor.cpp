@@ -64,6 +64,7 @@ HordeProcessor::HordeProcessor()
 {
     auto g = [this] (const char* id) { return apvts.getRawParameterValue (id); };
     formats.registerBasicFormats();
+    startTimerHz (10);
     raw = { g ("voices"), g ("takes"), g ("maleTakes"), g ("balance"), g ("delayMin"), g ("delaySpread"),
             g ("pitchSpread"), g ("drift"), g ("timbre"), g ("humanize"), g ("distance"), g ("depthSpread"),
             g ("width"), g ("reverb"), g ("room"), g ("dry"), g ("wet"), g ("seed"), g ("roomType"), g ("scatter"), g ("loose"), g ("mix") };
@@ -122,6 +123,44 @@ void HordeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
 
     const int nIn = getTotalNumInputChannels();
     numInputsSeen.store (nIn);
+
+    // ---- CAPTURE: while armed, record the input and pass it through untouched
+    if (capArmed.load())
+    {
+        const bool rolling = ! p.hasTransport || p.playing;
+        const int ns = buffer.getNumSamples();
+        if (rolling && ! capStopRequest.load())
+        {
+            const int chans = juce::jmin (nIn, horde::kMaxTakes);
+            capChannels.store (juce::jmax (capChannels.load(), chans));
+            const int start = capLen.load();
+            for (int c = 0; c < chans; ++c)
+            {
+                const float* src = buffer.getReadPointer (c);
+                for (int i = 0; i < ns; ++i)
+                {
+                    const int idx = start + i;
+                    const int ch = idx / kCapChunk;
+                    if (ch >= kCapMaxChunks) break;
+                    if (float* dst = cap[(size_t) c].chunks[(size_t) ch].load())
+                        dst[idx % kCapChunk] = src[i];
+                }
+            }
+            capLen.store (juce::jmin (start + ns, kCapChunk * kCapMaxChunks));
+            capRecording.store (true);
+        }
+        else if (capRecording.load() || capStopRequest.load())
+        {
+            // playback stopped (or user pressed the button again): done
+            capArmed.store (false);
+            capStopRequest.store (false);
+            capDone.store (capRecording.load());
+            capRecording.store (false);
+        }
+        for (int c = 2; c < buffer.getNumChannels(); ++c)
+            buffer.clear (c, 0, ns);
+        return;
+    }
 
     const int n = buffer.getNumSamples();
     int done = 0;
@@ -238,6 +277,114 @@ void HordeProcessor::handleAsyncUpdate()
         linkChildTracks();
 }
 
+void HordeProcessor::toggleCapture()
+{
+    if (capArmed.load())
+    {
+        capStopRequest.store (true);
+        return;
+    }
+    freeCaptureChunks();
+    capLen.store (0);
+    capChannels.store (0);
+    capDone.store (false);
+    capStopRequest.store (false);
+    capSampleRate = getSampleRate() > 0 ? getSampleRate() : 48000.0;
+    for (auto& c : cap)                                  // first few seconds ready before recording starts
+        for (int i = 0; i < 8; ++i)
+            c.chunks[(size_t) i].store (new float[kCapChunk]());
+    capArmed.store (true);
+}
+
+HordeProcessor::CaptureState HordeProcessor::getCaptureState() const
+{
+    if (capRecording.load()) return CaptureState::recording;
+    if (capArmed.load())     return CaptureState::armed;
+    return CaptureState::idle;
+}
+
+void HordeProcessor::freeCaptureChunks()
+{
+    for (auto& c : cap)
+        for (auto& ch : c.chunks)
+            delete[] ch.exchange (nullptr);
+}
+
+void HordeProcessor::timerCallback()
+{
+    if (capArmed.load())
+    {
+        // keep ~8 chunks of free space ahead of the write position
+        const int needed = juce::jmin (kCapMaxChunks, capLen.load() / kCapChunk + 8);
+        for (auto& c : cap)
+            for (int i = 0; i < needed; ++i)
+                if (c.chunks[(size_t) i].load() == nullptr)
+                    c.chunks[(size_t) i].store (new float[kCapChunk]());
+    }
+    else if (capDone.exchange (false))
+    {
+        finishCapture();
+    }
+    else if (! capArmed.load() && capLen.load() == 0 && cap[0].chunks[0].load() != nullptr)
+    {
+        freeCaptureChunks();   // cancelled before anything was recorded
+    }
+}
+
+void HordeProcessor::finishCapture()
+{
+    const int len = capLen.load();
+    const int chans = capChannels.load();
+    std::vector<juce::AudioBuffer<float>> bufs;
+    for (int c = 0; c < chans; ++c)
+    {
+        juce::AudioBuffer<float> b (1, len);
+        b.clear();
+        for (int k = 0; k * kCapChunk < len; ++k)
+            if (float* src = cap[(size_t) c].chunks[(size_t) k].load())
+                b.copyFrom (0, k * kCapChunk, src, juce::jmin (kCapChunk, len - k * kCapChunk));
+        bufs.push_back (std::move (b));
+    }
+    freeCaptureChunks();
+    capLen.store (0);
+
+    // a stereo track feeds the same take into L and R: keep it once
+    std::vector<bool> skip (bufs.size(), false);
+    for (size_t c = 1; c < bufs.size(); ++c)
+    {
+        const float rms = bufs[c].getRMSLevel (0, 0, len);
+        if (rms < 1.0e-5f) { skip[c] = true; continue; }
+        for (size_t d = 0; d < c; ++d)
+        {
+            if (skip[d]) continue;
+            juce::AudioBuffer<float> diff (bufs[c]);
+            diff.addFrom (0, 0, bufs[d], 0, 0, len, -1.0f);
+            if (diff.getRMSLevel (0, 0, len) < rms * 0.15f) { skip[c] = true; break; }
+        }
+    }
+
+    takes.erase (std::remove_if (takes.begin(), takes.end(),
+                                 [] (auto& t) { return t->path.startsWith ("capture:"); }), takes.end());
+    int added = 0;
+    for (size_t c = 0; c < bufs.size(); ++c)
+    {
+        if (skip[c]) continue;
+        const auto name = "Captured input " + juce::String ((int) c + 1);
+        if (auto t = makeTake (bufs[c], capSampleRate, name, "capture:" + juce::String ((int) c + 1), false))
+        {
+            takes.push_back (t);
+            ++added;
+        }
+    }
+    publishTakes();
+
+    lastCaptureMessage = added > 0
+        ? "Captured " + juce::String (added) + " take(s), " + juce::String (len / capSampleRate, 1) + " s.\n\n"
+          "They are now played by the crowd and saved inside the project. Set M/F for each one in the list."
+        : juce::String ("Nothing was captured: the plugin input was silent. Route the take tracks into HORDE and try again.");
+    if (onCaptureFinished) onCaptureFinished (lastCaptureMessage);
+}
+
 void HordeProcessor::removeTake (int index)
 {
     if (juce::isPositiveAndBelow (index, (int) takes.size()))
@@ -270,6 +417,20 @@ void HordeProcessor::getStateInformation (juce::MemoryBlock& destData)
     for (auto& t : takes)
         if (! t->path.startsWith ("track:"))
             files.appendChild (juce::ValueTree ("File", { { "path", t->path }, { "female", t->female.load() } }), nullptr);
+    for (auto& t : takes)
+    {
+        if (! t->path.startsWith ("capture:")) continue;
+        juce::MemoryBlock mb;
+        {
+            juce::FlacAudioFormat flac;
+            std::unique_ptr<juce::AudioFormatWriter> w (flac.createWriterFor (new juce::MemoryOutputStream (mb, false),
+                                                                              t->sampleRate, 1, 16, {}, 0));
+            if (w != nullptr)
+                w->writeFromAudioSampleBuffer (t->audio, 0, t->audio.getNumSamples());
+        }
+        files.appendChild (juce::ValueTree ("Captured", { { "name", t->name }, { "id", t->path }, { "female", t->female.load() },
+                                                          { "flac", mb.toBase64Encoding() } }), nullptr);
+    }
     state.appendChild (files, nullptr);
     if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
@@ -284,8 +445,24 @@ void HordeProcessor::setStateInformation (const void* data, int sizeInBytes)
             auto files = tree.getChildWithName ("Files");
             juce::StringArray paths;
             std::vector<bool> fem;
+            std::vector<std::shared_ptr<horde::Take>> captured;
             for (auto f : files)
             {
+                if (f.hasType ("Captured"))
+                {
+                    juce::MemoryBlock mb;
+                    mb.fromBase64Encoding (f["flac"].toString());
+                    juce::FlacAudioFormat flac;
+                    std::unique_ptr<juce::AudioFormatReader> rd (flac.createReaderFor (new juce::MemoryInputStream (mb, true), true));
+                    if (rd != nullptr)
+                    {
+                        juce::AudioBuffer<float> b (1, (int) rd->lengthInSamples);
+                        rd->read (&b, 0, (int) rd->lengthInSamples, 0, true, false);
+                        if (auto t = makeTake (b, rd->sampleRate, f["name"].toString(), f["id"].toString(), (bool) f["female"]))
+                            captured.push_back (t);
+                    }
+                    continue;
+                }
                 paths.add (f["path"].toString());
                 fem.push_back ((bool) f["female"]);
             }
@@ -294,6 +471,7 @@ void HordeProcessor::setStateInformation (const void* data, int sizeInBytes)
 
             takes.clear();
             linkedToTracks = (bool) files.getProperty ("linkTracks", false);
+            for (auto& c : captured) takes.push_back (c);
             addFiles (paths);
             if (linkedToTracks)
                 triggerAsyncUpdate();
