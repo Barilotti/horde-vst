@@ -65,7 +65,7 @@ private:
     std::array<float, horde::kMaxTakes> lv {};
 };
 
-class OutputMeter : public juce::Component
+class OutputMeter : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     explicit OutputMeter (HordeProcessor& p) : proc (p) {}
@@ -73,7 +73,81 @@ public:
     void tick();
 private:
     HordeProcessor& proc;
-    std::array<float, 2> lv {};
+    std::array<float, horde::kNumSpeakers> lv {};
+};
+
+// Header control: < group name >. Click the name to open the Crowds browser.
+class GroupSelector : public juce::Component, public juce::SettableTooltipClient
+{
+public:
+    explicit GroupSelector (HordeProcessor&);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void mouseUp (const juce::MouseEvent&) override;
+    std::function<void()> onOpen;
+private:
+    HordeProcessor& proc;
+    juce::TextButton prev { "<" }, next { ">" };
+};
+
+// Altiverb-style browser: groups on the left, all loaded files on the right.
+class CrowdsBrowser : public juce::Component
+{
+public:
+    explicit CrowdsBrowser (HordeProcessor&);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+    void refresh();
+    std::function<void()> onAddFiles;
+    std::function<void()> onClose;
+private:
+    juce::Rectangle<int> panelArea() const;
+    juce::Rectangle<int> groupsArea() const;
+    juce::Rectangle<int> filesArea() const;
+    juce::Rectangle<float> groupRow (int row) const;
+    juce::Rectangle<float> fileRow (int visibleRow) const;
+    int visibleFileRows() const;
+    void startNaming (int groupIndex);    // -1 = new group
+    void commitNaming();
+    void assignSelected (bool intoGroup);
+    void updateButtons();
+
+    HordeProcessor& proc;
+    std::vector<bool> selected;
+    int lastClicked = -1, fileScroll = 0, namingIndex = -2;
+    juce::TextButton closeButton { juce::String::fromUTF8 ("\xc3\x97") };
+    juce::TextButton newButton { "+ NEW GROUP" }, renameButton { "RENAME" }, deleteButton { "DELETE" };
+    juce::TextButton putButton { "PUT INTO GROUP" }, removeButton { "REMOVE FROM GROUP" };
+    juce::TextButton allButton { "SELECT ALL" }, addButton { "+ ADD FILES" };
+    juce::TextEditor nameEditor;
+};
+
+// Slide-out drawer at the bottom: per output channel MIX knob, level fader and meter.
+class ChannelDrawer : public juce::Component
+{
+public:
+    explicit ChannelDrawer (HordeProcessor&);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void tick();
+    std::function<void()> onClose;
+private:
+    struct Strip
+    {
+        juce::Slider mix { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
+        juce::Slider level { juce::Slider::LinearVertical, juce::Slider::NoTextBox };
+        std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mixAtt, levelAtt;
+        float meter = 0.0f;
+    };
+    std::array<int, horde::kNumSpeakers> shown() const;   // speakers visible for the current format, -1 terminated
+    juce::Rectangle<int> stripArea (int k, int count) const;
+    HordeProcessor& proc;
+    std::array<Strip, horde::kNumSpeakers> strips;
+    juce::TextButton closeButton { juce::String::fromUTF8 ("\xe2\x96\xbc") };
+    int lastFormat = -1;
 };
 
 class TakesPanel : public juce::Component, public juce::SettableTooltipClient
@@ -129,6 +203,8 @@ public:
     void paint (juce::Graphics&) override;
     void paintOverChildren (juce::Graphics&) override;
     void resized() override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void showPanel (int which) { if (which == 1) { setDrawerOpen (true); drawerPos = 1.0f; resized(); } else if (which == 2) openCrowds(); }
 
     bool isInterestedInFileDrag (const juce::StringArray&) override;
     void fileDragEnter (const juce::StringArray&, int, int) override { dragOver = true; repaint(); }
@@ -137,6 +213,10 @@ public:
 
 private:
     void timerCallback() override;
+    void paintCaptions (juce::Graphics&);
+    juce::Rectangle<int> drawerTab() const { return { 486, 684, 148, 16 }; }
+    void setDrawerOpen (bool);
+    void openCrowds();
     void reroll();
     void updateMode();
     void chooseFiles();
@@ -157,9 +237,15 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> balanceAtt;
     juce::TextButton rerollButton { "REROLL" };
     juce::Label seedValue;
-    juce::TextButton addButton { "+ ADD TAKES" };
-    juce::TextButton linkButton { "LINK TRACKS" };
+    juce::TextButton addButton { "+ ADD" };
+    juce::TextButton linkButton { "LINK" };
     juce::TextButton captureButton { "CAPTURE" };
+    juce::TextButton crowdsButton { "CROWDS" };
+    GroupSelector groupSelector;
+    CrowdsBrowser browser;
+    ChannelDrawer drawer;
+    bool drawerOpen = false;
+    float drawerPos = 0.0f;     // 0 hidden .. 1 fully open
     int blink = 0;
     std::unique_ptr<juce::FileChooser> chooser;
     bool dragOver = false;

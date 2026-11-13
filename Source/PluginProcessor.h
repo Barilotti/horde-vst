@@ -37,12 +37,30 @@ public:
     const horde::CrowdEngine& getEngine() const { return engine; }
     int getNumConnectedInputs() const { return numInputsSeen.load(); }
 
-    static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
+    static juce::AudioProcessorValueTreeState::ParameterLayout createLayout (HordeProcessor* owner);
+    void processorLayoutsChanged() override { updateOutputMap(); }
+
+    // ---- Output format, chosen by the DAW track (mono / stereo / 5.1)
+    horde::OutFormat getOutFormat() const { return (horde::OutFormat) outFormat.load(); }
+    static const char* speakerId (int s);       // "L", "R", "C", "LFE", "Ls", "Rs"
 
     // ---- Files mode (message thread only)
     void addFiles (const juce::StringArray& paths);
     void removeTake (int index);
     void toggleFemale (int index);
+
+    // ---- Crowd groups ("zombies", "screaming crowd", ...). The crowd plays only the active group.
+    const juce::StringArray& getGroups() const { return groups; }
+    juce::String createGroup (const juce::String& name);          // returns the unique name used
+    void renameGroup (int groupIndex, const juce::String& name);  // 0-based
+    void deleteGroup (int groupIndex);
+    void setTakeGroup (int takeIndex, const juce::String& group); // "" = no group
+    int  getActiveGroup() const;                                  // 0 = all files (Custom), k = groups[k-1]
+    void setActiveGroup (int g);
+    void stepActiveGroup (int delta);
+    juce::String getActiveGroupLabel() const;                     // None / Custom / group name
+    int  countTakesInGroup (int g) const;
+    juce::String groupNameForParam (int v) const;
     const std::vector<std::shared_ptr<horde::Take>>& getTakes() const { return takes; }
     std::function<void()> onTakesChanged;
 
@@ -66,6 +84,14 @@ private:
     ReaperBridge reaperBridge;
     juce::AudioFormatManager formats;
     void publishTakes();
+    void updateOutputMap();
+    std::atomic<int> outFormat { (int) horde::OutFormat::stereo };
+    std::array<std::atomic<int>, horde::kNumSpeakers> outIndex {};
+    juce::StringArray groups;
+    juce::StringPairArray pendingTrackGroups;   // track take path -> group, applied when tracks are (re)linked
+    mutable juce::SpinLock groupNamesLock;
+    juce::StringArray groupNamesForHost;
+    void groupsChanged();
     void handleAsyncUpdate() override;
     static std::shared_ptr<horde::Take> makeTake (const juce::AudioBuffer<float>&, double sampleRate,
                                                   const juce::String& name, const juce::String& path, bool female);
@@ -90,6 +116,8 @@ private:
         std::atomic<float>* humanize; std::atomic<float>* distance; std::atomic<float>* depthSpread;
         std::atomic<float>* width; std::atomic<float>* reverb; std::atomic<float>* room;
         std::atomic<float>* dry; std::atomic<float>* wet; std::atomic<float>* seed; std::atomic<float>* roomType; std::atomic<float>* scatter; std::atomic<float>* loose; std::atomic<float>* mix;
+        std::atomic<float>* group;
+        std::array<std::atomic<float>*, horde::kNumSpeakers> lvl, chMix;
     } raw {};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HordeProcessor)

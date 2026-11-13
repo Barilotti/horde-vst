@@ -188,9 +188,35 @@ void LookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int 
 }
 
 void LookAndFeel::drawLinearSlider (juce::Graphics& g, int x, int y, int w, int h, float pos, float, float,
-                                    juce::Slider::SliderStyle, juce::Slider&)
+                                    juce::Slider::SliderStyle style, juce::Slider& s)
 {
     auto r = juce::Rectangle<float> ((float) x, (float) y, (float) w, (float) h);
+    if (style == juce::Slider::LinearVertical)
+    {
+        // channel fader: dark slot, ember fill from the bottom, 0 dB mark, grooved cap
+        auto slot = r.withSizeKeepingCentre (6.0f, r.getHeight());
+        g.setColour (juce::Colour (0xff080606));
+        g.fillRoundedRectangle (slot, 3.0f);
+        g.setColour (Colours::panelEdge);
+        g.drawRoundedRectangle (slot, 3.0f, 1.0f);
+        auto fill = slot.withTop (pos).reduced (1.5f, 0.0f);
+        juce::ColourGradient fg (juce::Colour (0xffff7a3a), 0, slot.getY(), Colours::blood, 0, slot.getBottom(), false);
+        g.setGradientFill (fg);
+        g.fillRoundedRectangle (fill, 2.0f);
+        const float zeroY = (float) s.getPositionOfValue (0.0);
+        g.setColour (Colours::textDim.withAlpha (0.7f));
+        g.drawHorizontalLine ((int) zeroY, r.getX() + 2.0f, slot.getX() - 3.0f);
+        g.drawHorizontalLine ((int) zeroY, slot.getRight() + 3.0f, r.getRight() - 2.0f);
+        auto cap = juce::Rectangle<float> (juce::jmin (30.0f, r.getWidth()), 14.0f).withCentre ({ r.getCentreX(), pos });
+        g.setColour (juce::Colours::black.withAlpha (0.5f));
+        g.fillRoundedRectangle (cap.translated (0, 2), 3.0f);
+        juce::ColourGradient cg (juce::Colour (0xff4a403c), 0, cap.getY(), juce::Colour (0xff17110f), 0, cap.getBottom(), false);
+        g.setGradientFill (cg);
+        g.fillRoundedRectangle (cap, 3.0f);
+        g.setColour (s.isMouseOverOrDragging() ? Colours::ember : juce::Colour (0xffffb08a));
+        g.fillRect (cap.withSizeKeepingCentre (cap.getWidth() - 8.0f, 2.0f));
+        return;
+    }
     auto track = r.withSizeKeepingCentre (r.getWidth(), 4.0f);
     juce::ColourGradient grad (Colours::male.withAlpha (0.8f), track.getX(), 0, Colours::female.withAlpha (0.8f), track.getRight(), 0, false);
     grad.addColour (0.5, juce::Colour (0xff3a2c2a));
@@ -357,6 +383,91 @@ void Battlefield::paint (juce::Graphics& g)
     juce::Graphics::ScopedSaveState ss (g);
     g.reduceClipRegion (shape);
 
+    if (proc.getOutFormat() == horde::OutFormat::surround51)
+    {
+        // ---- 5.1: listener in the middle, crowd all around, speakers marked on the ring
+        const float cx = r.getCentreX(), cy = r.getCentreY() + 14.0f;
+        const float rx = r.getWidth() * 0.5f - 40.0f, ry = r.getHeight() * 0.5f - 34.0f;
+        juce::ColourGradient glow (Colours::red.withAlpha (0.28f), cx, cy, juce::Colours::transparentBlack, cx + rx, cy, true);
+        g.setGradientFill (glow);
+        g.fillRect (r);
+        for (int i = 1; i <= 5; ++i)
+        {
+            const float t = (float) i / 5.0f;
+            g.setColour (juce::Colour (0xff5a3a36).withAlpha (0.40f - 0.04f * (float) i));
+            g.drawEllipse (cx - rx * t, cy - ry * t, rx * t * 2.0f, ry * t * 2.0f, 1.0f);
+        }
+        for (int i = 0; i < 12; ++i)
+        {
+            const float a = (float) i * juce::MathConstants<float>::twoPi / 12.0f;
+            g.setColour (juce::Colour (0xff5a3a36).withAlpha (0.2f));
+            g.drawLine (cx, cy, cx + std::sin (a) * rx, cy - std::cos (a) * ry, 1.0f);
+        }
+        static const std::pair<const char*, float> spk[] = { { "L", -30.0f }, { "C", 0.0f }, { "R", 30.0f }, { "Ls", -110.0f }, { "Rs", 110.0f } };
+        for (auto& [name, deg] : spk)
+        {
+            const float a = juce::degreesToRadians (deg);
+            const float x = cx + std::sin (a) * (rx + 18.0f), y = cy - std::cos (a) * (ry + 14.0f);
+            g.setColour (Colours::panelHi);
+            g.fillRoundedRectangle (x - 13.0f, y - 8.0f, 26.0f, 16.0f, 4.0f);
+            g.setColour (Colours::red.withAlpha (0.7f));
+            g.drawRoundedRectangle (x - 13.0f, y - 8.0f, 26.0f, 16.0f, 4.0f, 1.0f);
+            g.setColour (Colours::text);
+            g.setFont (uiFont (10.5f, true));
+            g.drawText (name, juce::Rectangle<float> (x - 13.0f, y - 8.0f, 26.0f, 16.0f), juce::Justification::centred);
+        }
+        const auto& eng = proc.getEngine();
+        for (int pass = 0; pass < 2; ++pass)
+            for (int i = 0; i < horde::kMaxVoices; ++i)
+            {
+                const float f = fade[(size_t) i];
+                if (f < 0.02f) continue;
+                const auto& v = eng.voice (i);
+                const float dist = v.vizDist.load();
+                const float a = juce::degreesToRadians (v.vizAz.load());
+                const float rn = 0.28f + 0.68f * dist;
+                const float x = cx + std::sin (a) * rx * rn, y = cy - std::cos (a) * ry * rn;
+                const float lvl = smooth[(size_t) i];
+                const auto col = v.vizFemale.load() ? Colours::female : Colours::male;
+                const float rad = (2.6f + 4.8f * lvl) * (1.25f - 0.55f * dist);
+                if (pass == 0)
+                {
+                    juce::ColourGradient halo (col.withAlpha ((0.16f + 0.4f * lvl) * f), x, y, col.withAlpha (0.0f), x + rad * 4.0f, y, true);
+                    g.setGradientFill (halo);
+                    g.fillEllipse (x - rad * 4.0f, y - rad * 4.0f, rad * 8.0f, rad * 8.0f);
+                }
+                else
+                {
+                    g.setColour (col.withAlpha ((0.55f + 0.45f * lvl) * f));
+                    g.fillEllipse (x - rad, y - rad, rad * 2, rad * 2);
+                }
+            }
+        // listener, seen from above: head with a nose pointing at the screen
+        g.setColour (juce::Colour (0xff231a19));
+        g.fillEllipse (cx - 14.0f, cy - 14.0f, 28.0f, 28.0f);
+        juce::Path nose;
+        nose.addTriangle (cx - 6.0f, cy - 12.0f, cx + 6.0f, cy - 12.0f, cx, cy - 22.0f);
+        g.fillPath (nose);
+        g.setColour (Colours::red.withAlpha (0.7f));
+        g.drawEllipse (cx - 14.0f, cy - 14.0f, 28.0f, 28.0f, 1.2f);
+        g.strokePath (nose, juce::PathStrokeType (1.0f));
+
+        g.setFont (uiFont (11.0f, true, 0.35f));
+        g.setColour (Colours::textDim);
+        g.drawText ("5.1 FIELD  /  TOP VIEW", r.withHeight (34.0f), juce::Justification::centred);
+        const bool files = eng.filesMode();
+        g.setFont (uiFont (10.5f, true, 0.2f));
+        g.setColour (files ? Colours::ember : Colours::textDim);
+        g.drawText (files ? "MODE: TAKE FILES" : "MODE: LIVE INPUT", juce::Rectangle<float> (r.getX() + 18, r.getY() + 10, 200, 14), juce::Justification::left);
+        auto leg = juce::Rectangle<float> (r.getX() + 20.0f, r.getBottom() - 30.0f, 200.0f, 18.0f);
+        g.setFont (uiFont (12.5f));
+        g.setColour (Colours::male);   g.fillEllipse (leg.getX(), leg.getCentreY() - 4.5f, 9, 9);
+        g.setColour (Colours::text);   g.drawText ("Male", leg.withTrimmedLeft (15), juce::Justification::centredLeft);
+        g.setColour (Colours::female); g.fillEllipse (leg.getX() + 66, leg.getCentreY() - 4.5f, 9, 9);
+        g.setColour (Colours::text);   g.drawText ("Female", leg.withTrimmedLeft (81), juce::Justification::centredLeft);
+        return;
+    }
+
     const float cx = r.getCentreX();
     const float base = r.getBottom() - 6.0f;
     const float depth = r.getHeight() - 62.0f;
@@ -438,7 +549,7 @@ void Battlefield::paint (juce::Graphics& g)
     g.setFont (uiFont (11.0f, true, 0.35f));
     g.setColour (Colours::textDim);
     auto top = r.withHeight (34.0f);
-    g.drawText ("STEREO FIELD", top.withRight (cx - 12.0f), juce::Justification::centredRight);
+    g.drawText (proc.getOutFormat() == horde::OutFormat::mono ? "MONO FIELD" : "STEREO FIELD", top.withRight (cx - 12.0f), juce::Justification::centredRight);
     g.drawText ("TOP VIEW", top.withLeft (cx + 12.0f), juce::Justification::centredLeft);
     g.setColour (Colours::red);
     g.fillEllipse (cx - 2.5f, top.getCentreY() - 2.5f, 5.0f, 5.0f);
@@ -538,7 +649,7 @@ void InputMeters::paint (juce::Graphics& g)
 //==============================================================================
 void OutputMeter::tick()
 {
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; i < horde::kNumSpeakers; ++i)
     {
         const float db = juce::Decibels::gainToDecibels (proc.getEngine().outputLevel (i), -60.0f);
         const float n = juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 60.0f);
@@ -550,9 +661,25 @@ void OutputMeter::tick()
 void OutputMeter::paint (juce::Graphics& g)
 {
     auto r = getLocalBounds().toFloat();
-    const float w = (r.getWidth() - 4.0f) * 0.5f;
-    drawSegmentBar (g, r.withWidth (w), lv[0], true, 18);
-    drawSegmentBar (g, r.withTrimmedLeft (w + 4.0f), lv[1], true, 18);
+    const auto f = proc.getOutFormat();
+    const int n = f == horde::OutFormat::surround51 ? 6 : f == horde::OutFormat::mono ? 1 : 2;
+    static const char* names[] = { "L", "R", "C", "LFE", "Ls", "Rs" };
+    auto bars = r.withTrimmedBottom (n > 2 ? 12.0f : 0.0f);
+    if (n <= 2) bars = bars.withSizeKeepingCentre (n == 1 ? 14.0f : 30.0f, bars.getHeight());
+    const float gap = n > 2 ? 2.0f : 4.0f;
+    const float w = (bars.getWidth() - gap * (float) (n - 1)) / (float) n;
+    for (int i = 0; i < n; ++i)
+    {
+        auto b = bars.withX (bars.getX() + (float) i * (w + gap)).withWidth (w);
+        drawSegmentBar (g, b, lv[(size_t) i], true, 18);
+        if (n > 2)
+        {
+            g.setColour (Colours::textDim);
+            g.setFont (uiFont (8.0f, true));
+            g.drawText (i == 3 ? "LF" : names[i], juce::Rectangle<float> (b.getCentreX() - 10.0f, r.getBottom() - 11.0f, 20.0f, 11.0f),
+                        juce::Justification::centred);
+        }
+    }
 }
 
 //==============================================================================
@@ -602,7 +729,9 @@ void TakesPanel::paint (juce::Graphics& g)
         g.setColour (Colours::textDim);
         g.setFont (uiFont (11.0f, true));
         g.drawText (juce::String (i + 1), b.withWidth (22.0f), juce::Justification::centred);
-        g.setColour (Colours::text);
+        const int ag = proc.getActiveGroup();
+        const bool inGroup = ag == 0 || t.group == proc.getGroups()[ag - 1];
+        g.setColour (inGroup ? Colours::text : Colours::textDim.withAlpha (0.6f));
         g.setFont (uiFont (12.5f));
         g.drawFittedText (t.name, b.withTrimmedLeft (24.0f).withTrimmedRight (58.0f).toNearestInt(), juce::Justification::centredLeft, 1, 0.8f);
     }
@@ -825,8 +954,498 @@ void RoomView::paint (juce::Graphics& g)
 }
 
 //==============================================================================
+GroupSelector::GroupSelector (HordeProcessor& p) : proc (p)
+{
+    prev.onClick = [this] { proc.stepActiveGroup (-1); repaint(); };
+    next.onClick = [this] { proc.stepActiveGroup (+1); repaint(); };
+    prev.setTooltip (juce::String::fromUTF8 ("Предыдущая группа толпы."));
+    next.setTooltip (juce::String::fromUTF8 ("Следующая группа толпы."));
+    addAndMakeVisible (prev);
+    addAndMakeVisible (next);
+}
+
+void GroupSelector::resized()
+{
+    auto r = getLocalBounds();
+    prev.setBounds (r.removeFromLeft (30));
+    next.setBounds (r.removeFromRight (30));
+}
+
+void GroupSelector::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds().toFloat().reduced (32.0f, 0.0f);
+    g.setColour (juce::Colour (0xff120e0e));
+    g.fillRoundedRectangle (r, 6.0f);
+    g.setColour (isMouseOver() ? Colours::red.withAlpha (0.8f) : Colours::panelEdge);
+    g.drawRoundedRectangle (r.reduced (0.5f), 6.0f, 1.0f);
+    const auto label = proc.getActiveGroupLabel();
+    const int g0 = proc.getActiveGroup();
+    g.setColour (Colours::textDim);
+    g.setFont (uiFont (9.5f, true, 0.2f));
+    const auto sub = proc.getTakes().empty() ? juce::String ("GROUP")
+                   : "GROUP  " + juce::String (g0) + "/" + juce::String (proc.getGroups().size());
+    g.drawText (sub, r.withHeight (14.0f).translated (0, 2), juce::Justification::centred);
+    g.setColour (label == "None" ? Colours::textDim : Colours::text);
+    g.setFont (uiFont (14.0f, true));
+    g.drawFittedText (label, r.withTrimmedTop (12.0f).reduced (6.0f, 0.0f).toNearestInt(), juce::Justification::centred, 1, 0.75f);
+}
+
+void GroupSelector::mouseUp (const juce::MouseEvent& e)
+{
+    if (e.mouseWasClicked() && onOpen) onOpen();
+}
+
+//==============================================================================
+CrowdsBrowser::CrowdsBrowser (HordeProcessor& p) : proc (p)
+{
+    setInterceptsMouseClicks (true, true);
+    for (auto* b : { &closeButton, &newButton, &renameButton, &deleteButton, &putButton, &removeButton, &allButton, &addButton })
+        addAndMakeVisible (b);
+    closeButton.onClick = [this] { if (onClose) onClose(); };
+    newButton.onClick = [this] { startNaming (-1); };
+    renameButton.onClick = [this] { if (proc.getActiveGroup() > 0) startNaming (proc.getActiveGroup() - 1); };
+    deleteButton.onClick = [this] { if (proc.getActiveGroup() > 0) proc.deleteGroup (proc.getActiveGroup() - 1); refresh(); };
+    putButton.onClick = [this] { assignSelected (true); };
+    removeButton.onClick = [this] { assignSelected (false); };
+    allButton.onClick = [this]
+    {
+        const bool any = std::find (selected.begin(), selected.end(), false) != selected.end();
+        std::fill (selected.begin(), selected.end(), any);
+        refresh();
+    };
+    addButton.onClick = [this] { if (onAddFiles) onAddFiles(); };
+
+    newButton.setTooltip (juce::String::fromUTF8 ("Создать новую группу (например «Зомби» или «Кричащая толпа»)."));
+    renameButton.setTooltip (juce::String::fromUTF8 ("Переименовать выбранную группу (или двойной клик по ней)."));
+    deleteButton.setTooltip (juce::String::fromUTF8 ("Удалить выбранную группу. Файлы остаются загруженными, просто без группы."));
+    putButton.setTooltip (juce::String::fromUTF8 ("Положить отмеченные файлы в выбранную слева группу."));
+    removeButton.setTooltip (juce::String::fromUTF8 ("Убрать отмеченные файлы из их групп."));
+    allButton.setTooltip (juce::String::fromUTF8 ("Отметить все файлы (или снять отметку со всех)."));
+    addButton.setTooltip (juce::String::fromUTF8 ("Загрузить ещё файлы. Если выбрана группа, новые файлы сразу попадут в неё. Файлы можно и перетащить в это окно."));
+
+    nameEditor.setFont (uiFont (14.0f, true));
+    nameEditor.setColour (juce::TextEditor::backgroundColourId, juce::Colour (0xff0a0808));
+    nameEditor.setColour (juce::TextEditor::outlineColourId, Colours::ember);
+    nameEditor.onReturnKey = [this] { commitNaming(); };
+    nameEditor.onFocusLost = [this] { commitNaming(); };
+    nameEditor.onEscapeKey = [this] { namingIndex = -2; nameEditor.setVisible (false); };
+    addChildComponent (nameEditor);
+}
+
+juce::Rectangle<int> CrowdsBrowser::panelArea() const  { return { 100, 84, 920, 560 }; }
+juce::Rectangle<int> CrowdsBrowser::groupsArea() const { return { 124, 150, 260, 410 }; }
+juce::Rectangle<int> CrowdsBrowser::filesArea() const  { return { 404, 150, 592, 410 }; }
+
+juce::Rectangle<float> CrowdsBrowser::groupRow (int row) const
+{
+    auto a = groupsArea().toFloat();
+    return { a.getX() + 6.0f, a.getY() + 30.0f + 30.0f * (float) row, a.getWidth() - 12.0f, 27.0f };
+}
+
+juce::Rectangle<float> CrowdsBrowser::fileRow (int visibleRow) const
+{
+    auto a = filesArea().toFloat();
+    return { a.getX() + 6.0f, a.getY() + 30.0f + 25.0f * (float) visibleRow, a.getWidth() - 12.0f, 23.0f };
+}
+
+int CrowdsBrowser::visibleFileRows() const { return (filesArea().getHeight() - 36) / 25; }
+
+void CrowdsBrowser::resized()
+{
+    auto p = panelArea();
+    closeButton.setBounds (p.getRight() - 44, p.getY() + 12, 30, 30);
+    auto ga = groupsArea();
+    newButton.setBounds (ga.getX(), ga.getBottom() + 12, 120, 32);
+    renameButton.setBounds (ga.getX() + 126, ga.getBottom() + 12, 66, 32);
+    deleteButton.setBounds (ga.getX() + 196, ga.getBottom() + 12, 64, 32);
+    auto fa = filesArea();
+    putButton.setBounds (fa.getX(), fa.getBottom() + 12, 150, 32);
+    removeButton.setBounds (fa.getX() + 156, fa.getBottom() + 12, 166, 32);
+    allButton.setBounds (fa.getX() + 328, fa.getBottom() + 12, 110, 32);
+    addButton.setBounds (fa.getRight() - 120, fa.getBottom() + 12, 120, 32);
+}
+
+void CrowdsBrowser::refresh()
+{
+    selected.resize (proc.getTakes().size(), false);
+    updateButtons();
+    repaint();
+}
+
+void CrowdsBrowser::updateButtons()
+{
+    const bool grp = proc.getActiveGroup() > 0;
+    const bool any = std::find (selected.begin(), selected.end(), true) != selected.end();
+    renameButton.setEnabled (grp);
+    deleteButton.setEnabled (grp);
+    putButton.setEnabled (grp && any);
+    removeButton.setEnabled (any);
+    newButton.setEnabled (proc.getGroups().size() < horde::kMaxGroups);
+    putButton.setButtonText (grp ? "PUT INTO " + proc.getGroups()[proc.getActiveGroup() - 1].toUpperCase() : juce::String ("PUT INTO GROUP"));
+}
+
+void CrowdsBrowser::startNaming (int gi)
+{
+    if (gi < 0)
+    {
+        const auto name = proc.createGroup (juce::String::fromUTF8 ("Group ") + juce::String (proc.getGroups().size() + 1));
+        if (name.isEmpty()) return;
+        gi = proc.getGroups().indexOf (name);
+        proc.setActiveGroup (gi + 1);
+    }
+    namingIndex = gi;
+    nameEditor.setBounds (groupRow (gi + 1).toNearestInt().reduced (2, 0));
+    nameEditor.setText (proc.getGroups()[gi], false);
+    nameEditor.setVisible (true);
+    nameEditor.grabKeyboardFocus();
+    nameEditor.selectAll();
+    refresh();
+}
+
+void CrowdsBrowser::commitNaming()
+{
+    if (namingIndex < 0) return;
+    const int gi = namingIndex;
+    namingIndex = -2;
+    nameEditor.setVisible (false);
+    proc.renameGroup (gi, nameEditor.getText());
+    refresh();
+}
+
+void CrowdsBrowser::assignSelected (bool intoGroup)
+{
+    const int g0 = proc.getActiveGroup();
+    const auto name = intoGroup && g0 > 0 ? proc.getGroups()[g0 - 1] : juce::String();
+    for (size_t i = 0; i < selected.size(); ++i)
+        if (selected[i]) proc.setTakeGroup ((int) i, name);
+    std::fill (selected.begin(), selected.end(), false);
+    refresh();
+}
+
+void CrowdsBrowser::mouseDown (const juce::MouseEvent& e)
+{
+    if (! panelArea().contains (e.getPosition()))
+    {
+        if (onClose) onClose();
+        return;
+    }
+    const auto pos = e.position;
+    // groups: row 0 = Custom (all files), then the groups
+    for (int row = 0; row <= proc.getGroups().size(); ++row)
+        if (groupRow (row).contains (pos))
+        {
+            proc.setActiveGroup (row);
+            refresh();
+            return;
+        }
+    const auto& takes = proc.getTakes();
+    for (int vr = 0; vr < visibleFileRows(); ++vr)
+    {
+        auto b = fileRow (vr);
+        if (! b.contains (pos)) continue;
+        const int i = vr + fileScroll;
+        if (i >= (int) takes.size()) return;
+        if (pos.x > b.getRight() - 26.0f)      { proc.removeTake (i); selected.erase (selected.begin() + i); }
+        else if (pos.x > b.getRight() - 56.0f) proc.toggleFemale (i);
+        else if (e.mods.isShiftDown() && lastClicked >= 0)
+        {
+            for (int k = juce::jmin (lastClicked, i); k <= juce::jmax (lastClicked, i); ++k)
+                selected[(size_t) k] = true;
+        }
+        else
+        {
+            selected[(size_t) i] = ! selected[(size_t) i];
+            lastClicked = i;
+        }
+        refresh();
+        return;
+    }
+}
+
+void CrowdsBrowser::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    for (int row = 1; row <= proc.getGroups().size(); ++row)
+        if (groupRow (row).contains (e.position))
+            startNaming (row - 1);
+}
+
+void CrowdsBrowser::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& w)
+{
+    fileScroll = juce::jlimit (0, juce::jmax (0, (int) proc.getTakes().size() - visibleFileRows()), fileScroll + (w.deltaY < 0 ? 1 : -1));
+    repaint();
+}
+
+void CrowdsBrowser::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colours::black.withAlpha (0.62f));
+    auto p = panelArea().toFloat();
+    g.setColour (Colours::ember.withAlpha (0.08f));
+    g.fillRoundedRectangle (p.expanded (6.0f), 16.0f);
+    fillPanel (g, p, 12.0f);
+
+    drawIcon (g, Icon::crowd, juce::Rectangle<float> (p.getX() + 22, p.getY() + 20, 18, 18), Colours::red);
+    g.setColour (Colours::red.brighter (0.2f));
+    g.setFont (uiFont (17.0f, true, 0.08f));
+    g.drawText ("CROWDS", juce::Rectangle<float> (p.getX() + 50, p.getY() + 14, 200, 30), juce::Justification::centredLeft);
+    g.setColour (Colours::textDim);
+    g.setFont (uiFont (12.0f));
+    g.drawText (juce::String::fromUTF8 ("Выберите группу слева: толпа играет только её файлы. Отметьте файлы справа и положите их в группу."),
+                juce::Rectangle<float> (p.getX() + 160, p.getY() + 14, p.getWidth() - 220, 30), juce::Justification::centredLeft);
+
+    auto section = [&] (juce::Rectangle<int> a, const juce::String& title, const juce::String& right)
+    {
+        auto b = a.toFloat();
+        g.setColour (juce::Colour (0xff0e0b0b));
+        g.fillRoundedRectangle (b, 8.0f);
+        g.setColour (Colours::panelEdge);
+        g.drawRoundedRectangle (b, 8.0f, 1.0f);
+        g.setColour (Colours::text.withAlpha (0.85f));
+        g.setFont (uiFont (11.5f, true, 0.1f));
+        g.drawText (title, juce::Rectangle<float> (b.getX() + 12, b.getY() + 6, 200, 18), juce::Justification::centredLeft);
+        g.setColour (Colours::textDim);
+        g.setFont (uiFont (10.5f));
+        g.drawText (right, juce::Rectangle<float> (b.getRight() - 212, b.getY() + 6, 200, 18), juce::Justification::centredRight);
+    };
+
+    // ---- groups
+    const auto& groups = proc.getGroups();
+    const int active = proc.getActiveGroup();
+    section (groupsArea(), "GROUPS", juce::String (groups.size()) + " / " + juce::String (horde::kMaxGroups));
+    for (int row = 0; row <= groups.size(); ++row)
+    {
+        auto b = groupRow (row);
+        if (b.getBottom() > (float) groupsArea().getBottom()) break;
+        const bool on = row == active;
+        g.setColour (on ? Colours::blood.withAlpha (0.55f) : juce::Colour (0xff1d1716));
+        g.fillRoundedRectangle (b, 5.0f);
+        if (on)
+        {
+            g.setColour (Colours::ember);
+            g.drawRoundedRectangle (b.reduced (0.5f), 5.0f, 1.0f);
+        }
+        const auto name = row == 0 ? juce::String ("Custom  (all files)") : groups[row - 1];
+        g.setColour (row == 0 ? Colours::text.withAlpha (0.8f) : Colours::text);
+        g.setFont (uiFont (13.5f, row > 0));
+        g.drawFittedText (name, b.reduced (10.0f, 0.0f).withTrimmedRight (34.0f).toNearestInt(), juce::Justification::centredLeft, 1, 0.8f);
+        g.setColour (Colours::textDim);
+        g.setFont (uiFont (11.0f, true));
+        g.drawText (juce::String (proc.countTakesInGroup (row)), b.withTrimmedRight (10.0f), juce::Justification::centredRight);
+    }
+
+    // ---- files
+    const auto& takes = proc.getTakes();
+    int nSel = 0;
+    for (bool b : selected) nSel += b ? 1 : 0;
+    section (filesArea(), "LOADED FILES  (" + juce::String ((int) takes.size()) + ")",
+             nSel > 0 ? juce::String (nSel) + " selected" : juce::String ("click to select, shift = range"));
+    if (takes.empty())
+    {
+        g.setColour (Colours::textDim);
+        g.setFont (uiFont (14.0f));
+        g.drawFittedText (juce::String::fromUTF8 ("Файлов пока нет.\nПеретащите сюда дубли, нажмите + ADD FILES, CAPTURE или LINK."),
+                          filesArea().reduced (30), juce::Justification::centred, 3);
+    }
+    const auto activeName = active > 0 ? groups[active - 1] : juce::String();
+    const int visible = visibleFileRows();
+    fileScroll = juce::jlimit (0, juce::jmax (0, (int) takes.size() - visible), fileScroll);
+    for (int vr = 0; vr < visible; ++vr)
+    {
+        const int i = vr + fileScroll;
+        if (i >= (int) takes.size()) break;
+        const auto& t = *takes[(size_t) i];
+        auto b = fileRow (vr);
+        const bool sel = i < (int) selected.size() && selected[(size_t) i];
+        const bool inActive = active == 0 || t.group == activeName;
+        g.setColour (sel ? Colours::blood.withAlpha (0.45f) : juce::Colour (0xff1d1716));
+        g.fillRoundedRectangle (b, 4.0f);
+        // checkbox
+        auto cb = juce::Rectangle<float> (b.getX() + 8.0f, b.getCentreY() - 6.0f, 12.0f, 12.0f);
+        g.setColour (sel ? Colours::ember : Colours::panelEdge.brighter (0.3f));
+        if (sel) g.fillRoundedRectangle (cb, 2.0f); else g.drawRoundedRectangle (cb, 2.0f, 1.2f);
+        // name
+        g.setColour (inActive ? Colours::text : Colours::textDim);
+        g.setFont (uiFont (12.5f, inActive && active > 0));
+        g.drawFittedText (t.name, b.withTrimmedLeft (30.0f).withWidth (250.0f).toNearestInt(), juce::Justification::centredLeft, 1, 0.8f);
+        // length
+        g.setColour (Colours::textDim);
+        g.setFont (uiFont (11.0f));
+        const double sec = t.audio.getNumSamples() / juce::jmax (1.0, t.sampleRate);
+        g.drawText (juce::String (sec, 1) + " s", juce::Rectangle<float> (b.getX() + 284.0f, b.getY(), 50.0f, b.getHeight()), juce::Justification::centredRight);
+        // group chip
+        if (t.group.isNotEmpty())
+        {
+            auto chip = juce::Rectangle<float> (b.getX() + 346.0f, b.getY() + 3.0f, 150.0f, b.getHeight() - 6.0f);
+            g.setColour ((t.group == activeName ? Colours::ember : Colours::textDim).withAlpha (0.25f));
+            g.fillRoundedRectangle (chip, 8.0f);
+            g.setColour (t.group == activeName ? Colours::text : Colours::textDim);
+            g.setFont (uiFont (11.0f, true));
+            g.drawFittedText (t.group, chip.reduced (8.0f, 0.0f).toNearestInt(), juce::Justification::centred, 1, 0.8f);
+        }
+        // M/F and remove
+        const bool fem = t.female.load();
+        auto pill = juce::Rectangle<float> (b.getRight() - 52.0f, b.getY() + 3.0f, 24.0f, b.getHeight() - 6.0f);
+        g.setColour ((fem ? Colours::female : Colours::male).withAlpha (0.85f));
+        g.fillRoundedRectangle (pill, 7.0f);
+        g.setColour (juce::Colours::black);
+        g.setFont (uiFont (11.0f, true));
+        g.drawText (fem ? "F" : "M", pill, juce::Justification::centred);
+        g.setColour (Colours::textDim);
+        g.setFont (uiFont (14.0f, true));
+        g.drawText (juce::String::fromUTF8 ("\xc3\x97"), juce::Rectangle<float> (b.getRight() - 22.0f, b.getY(), 18.0f, b.getHeight()), juce::Justification::centred);
+    }
+    if ((int) takes.size() > visible)
+    {
+        g.setColour (Colours::textDim);
+        g.setFont (uiFont (10.0f));
+        g.drawText (juce::String (fileScroll + 1) + "-" + juce::String (juce::jmin ((int) takes.size(), fileScroll + visible)) + " of "
+                        + juce::String ((int) takes.size()) + "  (scroll)",
+                    juce::Rectangle<float> ((float) filesArea().getX() + 12.0f, (float) filesArea().getBottom() - 16.0f, (float) filesArea().getWidth() - 24.0f, 12.0f),
+                    juce::Justification::centredRight);
+    }
+}
+
+//==============================================================================
+ChannelDrawer::ChannelDrawer (HordeProcessor& p) : proc (p)
+{
+    static const char* fullNames[] = { "Left", "Right", "Centre", "LFE (sub)", "Left surround", "Right surround" };
+    for (int s = 0; s < horde::kNumSpeakers; ++s)
+    {
+        auto& st = strips[(size_t) s];
+        const juce::String sp (HordeProcessor::speakerId (s));
+        st.mixAtt   = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "mix" + sp, st.mix);
+        st.levelAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "lvl" + sp, st.level);
+        st.mix.setDoubleClickReturnValue (true, 0.5);
+        st.level.setDoubleClickReturnValue (true, 0.0);
+        st.mix.getProperties().set ("bipolar", true);
+        st.mix.onValueChange = [this] { repaint(); };
+        st.level.onValueChange = [this] { repaint(); };
+        st.mix.setTooltip (juce::String::fromUTF8 ("MIX канала ") + fullNames[s] + juce::String::fromUTF8 (
+            ": сколько в этом канале исходных дублей (влево, DRY) и сколько толпы (вправо, CROWD). По центру = как задано ручками DRY/WET. Двойной клик = центр."));
+        st.level.setTooltip (juce::String::fromUTF8 ("Громкость канала ") + fullNames[s] + juce::String::fromUTF8 (" (от -inf до +12 dB). Двойной клик = 0 dB."));
+        addChildComponent (st.mix);
+        addChildComponent (st.level);
+    }
+    closeButton.onClick = [this] { if (onClose) onClose(); };
+    closeButton.setTooltip (juce::String::fromUTF8 ("Спрятать шторку."));
+    addAndMakeVisible (closeButton);
+}
+
+std::array<int, horde::kNumSpeakers> ChannelDrawer::shown() const
+{
+    switch (proc.getOutFormat())
+    {
+        case horde::OutFormat::mono:       return { 0, -1, -1, -1, -1, -1 };
+        case horde::OutFormat::stereo:     return { 0, 1, -1, -1, -1, -1 };
+        case horde::OutFormat::surround51: break;
+    }
+    return { 0, 2, 1, 4, 5, 3 };   // L C R Ls Rs LFE: the way a mixer shows 5.1
+}
+
+juce::Rectangle<int> ChannelDrawer::stripArea (int k, int count) const
+{
+    const int w = 118, gap = 14;
+    const int total = count * w + (count - 1) * gap;
+    const int x0 = (getWidth() - total) / 2;
+    return { x0 + k * (w + gap), 44, w, getHeight() - 54 };
+}
+
+void ChannelDrawer::resized()
+{
+    closeButton.setBounds (getWidth() - 46, 8, 30, 26);
+    const auto sh = shown();
+    int count = 0;
+    for (int s : sh) count += s >= 0 ? 1 : 0;
+    for (auto& st : strips) { st.mix.setVisible (false); st.level.setVisible (false); }
+    for (int k = 0; k < count; ++k)
+    {
+        auto& st = strips[(size_t) sh[(size_t) k]];
+        auto a = stripArea (k, count);
+        st.mix.setBounds (a.getX() + 8, a.getY() + 22, 40, 40);
+        st.level.setBounds (a.getX() + 62, a.getY() + 6, 30, a.getHeight() - 26);
+        st.mix.setVisible (true);
+        st.level.setVisible (true);
+    }
+}
+
+void ChannelDrawer::tick()
+{
+    const int f = (int) proc.getOutFormat();
+    if (f != lastFormat) { lastFormat = f; resized(); }
+    for (int s = 0; s < horde::kNumSpeakers; ++s)
+    {
+        const float db = juce::Decibels::gainToDecibels (proc.getEngine().outputLevel (s), -60.0f);
+        const float n = juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 60.0f);
+        strips[(size_t) s].meter = juce::jmax (n, strips[(size_t) s].meter - 0.025f);
+    }
+    if (isVisible()) repaint();
+}
+
+void ChannelDrawer::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds().toFloat();
+    g.setColour (juce::Colours::black.withAlpha (0.6f));
+    g.fillRoundedRectangle (r.translated (0, -4), 12.0f);
+    juce::ColourGradient grad (juce::Colour (0xff221a19), 0, r.getY(), juce::Colour (0xff120e0e), 0, r.getBottom(), false);
+    g.setGradientFill (grad);
+    g.fillRoundedRectangle (r, 12.0f);
+    g.setColour (Colours::red.withAlpha (0.6f));
+    g.drawRoundedRectangle (r.reduced (0.5f), 12.0f, 1.0f);
+
+    const auto fmt = proc.getOutFormat();
+    drawIcon (g, Icon::output, juce::Rectangle<float> (18, 14, 16, 16), Colours::red);
+    g.setColour (Colours::red.brighter (0.2f));
+    g.setFont (uiFont (14.0f, true, 0.06f));
+    g.drawText ("OUTPUT CHANNELS", juce::Rectangle<float> (44, 9, 200, 26), juce::Justification::centredLeft);
+    g.setColour (Colours::text);
+    g.setFont (uiFont (13.0f, true));
+    g.drawText (fmt == horde::OutFormat::surround51 ? "5.1" : fmt == horde::OutFormat::mono ? "MONO" : "STEREO",
+                juce::Rectangle<float> (200, 9, 80, 26), juce::Justification::centredLeft);
+    g.setColour (Colours::textDim);
+    g.setFont (uiFont (11.5f));
+    g.drawText (juce::String::fromUTF8 ("Формат выхода задаёт дорожка DAW (моно / стерео / 5.1). MIX: исходник  <->  толпа, фейдер: громкость канала."),
+                juce::Rectangle<float> (290, 9, r.getWidth() - 350, 26), juce::Justification::centredLeft);
+
+    static const char* names[] = { "L", "R", "C", "LFE", "Ls", "Rs" };
+    const auto sh = shown();
+    int count = 0;
+    for (int s : sh) count += s >= 0 ? 1 : 0;
+    for (int k = 0; k < count; ++k)
+    {
+        const int s = sh[(size_t) k];
+        auto& st = strips[(size_t) s];
+        auto a = stripArea (k, count).toFloat();
+        g.setColour (juce::Colour (0xff0e0b0b));
+        g.fillRoundedRectangle (a, 8.0f);
+        g.setColour (Colours::panelEdge);
+        g.drawRoundedRectangle (a, 8.0f, 1.0f);
+        // name
+        g.setColour (Colours::text);
+        g.setFont (uiFont (16.0f, true));
+        g.drawText (fmt == horde::OutFormat::mono ? "M" : names[s], juce::Rectangle<float> (a.getX() + 4, a.getY() + 2, 48, 20), juce::Justification::centred);
+        // mix caption
+        g.setColour (Colours::text.withAlpha (0.85f));
+        g.setFont (uiFont (9.5f, true, 0.05f));
+        g.drawText ("MIX", juce::Rectangle<float> (a.getX() + 4, a.getY() + 64, 48, 12), juce::Justification::centred);
+        g.setColour (Colours::text);
+        g.setFont (uiFont (10.5f, true));
+        g.drawFittedText (st.mix.getTextFromValue (st.mix.getValue()), juce::Rectangle<int> ((int) a.getX() + 2, (int) a.getY() + 76, 54, 26),
+                          juce::Justification::centredTop, 2, 0.8f);
+        g.setColour (Colours::textDim);
+        g.setFont (uiFont (8.5f, true));
+        g.drawText ("DRY", juce::Rectangle<float> (a.getX() + 4, a.getY() + 104, 24, 10), juce::Justification::centredLeft);
+        g.drawText ("CROWD", juce::Rectangle<float> (a.getX() + 22, a.getY() + 104, 34, 10), juce::Justification::centredRight);
+        // level value
+        g.setColour (Colours::text);
+        g.setFont (uiFont (11.5f, true));
+        g.drawText (st.level.getTextFromValue (st.level.getValue()), juce::Rectangle<float> (a.getX() + 50, a.getBottom() - 20, 56, 16), juce::Justification::centred);
+        // meter
+        drawSegmentBar (g, juce::Rectangle<float> (a.getRight() - 18, a.getY() + 8, 8, a.getHeight() - 30), st.meter, true, 16);
+    }
+}
+
+//==============================================================================
 Content::Content (HordeProcessor& p)
-    : proc (p), field (p), meters (p), takesPanel (p), outMeter (p), room (p)
+    : proc (p), field (p), meters (p), takesPanel (p), outMeter (p), room (p), groupSelector (p), browser (p), drawer (p)
 {
     setLookAndFeel (&lnf);
 
@@ -913,10 +1532,27 @@ Content::Content (HordeProcessor& p)
     {
         juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "HORDE", msg, "OK", this);
     };
-    proc.onTakesChanged = [this] { updateMode(); takesPanel.repaint(); field.repaint(); };
+    proc.onTakesChanged = [this] { updateMode(); takesPanel.repaint(); field.repaint(); groupSelector.repaint(); browser.refresh(); };
     updateMode();
     addAndMakeVisible (outMeter);
+    outMeter.setTooltip (juce::String::fromUTF8 ("Уровень на выходе по каналам (моно / стерео / 5.1). Громкость и микс каждого канала: шторка CHANNELS внизу."));
     addAndMakeVisible (room);
+
+    crowdsButton.setTooltip (juce::String::fromUTF8 ("Окно групп толпы: все загруженные файлы, их можно разложить по группам "
+                                                     "(«Зомби», «Кричащая толпа»...). Толпа играет только выбранную группу."));
+    crowdsButton.onClick = [this] { openCrowds(); };
+    addAndMakeVisible (crowdsButton);
+    groupSelector.setTooltip (juce::String::fromUTF8 ("Какая группа толпы звучит. None = файлов нет, Custom = все загруженные файлы, "
+                                                      "дальше ваши группы. Стрелки листают, клик по названию открывает окно CROWDS. "
+                                                      "Параметр «Crowd group» можно автоматизировать в DAW, чтобы менять толпу по сценам."));
+    groupSelector.onOpen = [this] { openCrowds(); };
+    addAndMakeVisible (groupSelector);
+
+    drawer.onClose = [this] { setDrawerOpen (false); };
+    addAndMakeVisible (drawer);
+    browser.onClose = [this] { browser.setVisible (false); };
+    browser.onAddFiles = [this] { chooseFiles(); };
+    addChildComponent (browser);
 
     setSize (kDesignW, kDesignH);
     startTimerHz (30);
@@ -935,7 +1571,7 @@ static juce::String tooltipFor (const juce::String& id)
     static const std::pair<const char*, const char*> table[] = {
         { "voices", "Сколько голосов в толпе (1–100). Больше голосов = гуще толпа. 100 голосов грузят примерно 30% одного ядра." },
         { "mix", "Как часто голоса перескакивают на другой дубль и другую фразу. 0% = каждый голос держится за свой дубль, 100% = прыгают каждые 1–2 секунды. Главная ручка против эффекта «одно и то же с дилеем»." },
-        { "maleTakes", "Сколько первых входов (дорожек) считаются мужскими, остальные женские. LINK TRACKS выставляет это сам по названиям дорожек." },
+        { "maleTakes", "Сколько первых входов (дорожек) считаются мужскими, остальные женские. LINK выставляет это сам по названиям дорожек." },
         { "delayMin", "Минимальная задержка любого голоса. Никто в толпе не кричит раньше этого времени." },
         { "delaySpread", "Небольшой разброс задержек между голосами (до 0,5 с): толпа реагирует не идеально синхронно." },
         { "scatter", "Большой разброс во времени (до 3 с): голоса кричат разные куски фраз в разный момент, слова перестают совпадать. Для синхронного крика под картинку держите низко." },
@@ -979,6 +1615,25 @@ void Content::updateMode()
     meters.setVisible (! files);
 }
 
+void Content::openCrowds()
+{
+    browser.refresh();
+    browser.setVisible (true);
+    browser.toFront (false);
+}
+
+void Content::setDrawerOpen (bool open)
+{
+    drawerOpen = open;
+    if (open) drawer.toFront (false);
+}
+
+void Content::mouseUp (const juce::MouseEvent& e)
+{
+    if (e.mouseWasClicked() && drawerTab().contains (e.getPosition()))
+        setDrawerOpen (! drawerOpen);
+}
+
 void Content::chooseFiles()
 {
     chooser = std::make_unique<juce::FileChooser> ("Load take files", juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
@@ -988,7 +1643,13 @@ void Content::chooseFiles()
                           {
                               juce::StringArray paths;
                               for (auto& f : fc.getResults()) paths.add (f.getFullPathName());
-                              if (! paths.isEmpty()) proc.addFiles (paths);
+                              if (paths.isEmpty()) return;
+                              const int before = (int) proc.getTakes().size();
+                              proc.addFiles (paths);
+                              if (browser.isVisible() && proc.getActiveGroup() > 0)
+                                  for (int i = before; i < (int) proc.getTakes().size(); ++i)
+                                      proc.setTakeGroup (i, proc.getGroups()[proc.getActiveGroup() - 1]);
+                              browser.refresh();
                           });
 }
 
@@ -1003,7 +1664,12 @@ bool Content::isInterestedInFileDrag (const juce::StringArray& files)
 void Content::filesDropped (const juce::StringArray& files, int, int)
 {
     dragOver = false;
+    const int before = (int) proc.getTakes().size();
     proc.addFiles (files);
+    if (browser.isVisible() && proc.getActiveGroup() > 0)   // dropped into the Crowds window: straight into the group
+        for (int i = before; i < (int) proc.getTakes().size(); ++i)
+            proc.setTakeGroup (i, proc.getGroups()[proc.getActiveGroup() - 1]);
+    browser.refresh();
     repaint();
 }
 
@@ -1027,6 +1693,20 @@ void Content::timerCallback()
     meters.tick();
     outMeter.tick();
     room.tick();
+    drawer.tick();
+    {
+        const float target = drawerOpen ? 1.0f : 0.0f;
+        if (std::abs (drawerPos - target) > 0.001f)
+        {
+            drawerPos += (target - drawerPos) * 0.35f;
+            if (std::abs (drawerPos - target) < 0.01f) drawerPos = target;
+            resized();
+            repaint (drawerTab().expanded (4));
+        }
+        static juce::String lastLabel;
+        const auto label = proc.getActiveGroupLabel() + juce::String (proc.getActiveGroup());
+        if (label != lastLabel) { lastLabel = label; groupSelector.repaint(); takesPanel.repaint(); if (browser.isVisible()) browser.refresh(); }
+    }
     {
         ++blink;
         const auto st = proc.getCaptureState();
@@ -1062,7 +1742,7 @@ void Content::paint (juce::Graphics& g)
     }
 
     // seed box
-    auto seedBox = juce::Rectangle<float> (464, 30, 130, 36);
+    auto seedBox = juce::Rectangle<float> (708, 30, 104, 36);
     g.setColour (juce::Colour (0xff120e0e));
     g.fillRoundedRectangle (seedBox, 6.0f);
     g.setColour (Colours::panelEdge);
@@ -1073,7 +1753,7 @@ void Content::paint (juce::Graphics& g)
 
     g.setColour (Colours::textDim.withAlpha (0.6f));
     g.setFont (uiFont (11.0f, false, 0.2f));
-    g.drawText ("v0.5", juce::Rectangle<float> (1050, 34, 56, 28), juce::Justification::centredRight);
+    g.drawText ("v0.6", juce::Rectangle<float> (1040, 6, 66, 18), juce::Justification::centredRight);
 
     for (auto& pnl : panels)
     {
@@ -1086,11 +1766,33 @@ void Content::paint (juce::Graphics& g)
         g.setColour (Colours::panelEdge);
         g.drawHorizontalLine ((int) b.getY() + 42, b.getX() + 14, b.getRight() - 14);
     }
+    {
+        // output format next to the OUTPUT title
+        const auto f = proc.getOutFormat();
+        g.setColour (Colours::text);
+        g.setFont (uiFont (12.5f, true, 0.06f));
+        g.drawText (f == horde::OutFormat::surround51 ? "5.1" : f == horde::OutFormat::mono ? "MONO" : "STEREO",
+                    juce::Rectangle<float> (1000, 324, 94, 26), juce::Justification::centredRight);
+    }
+
+    // drawer tab (bottom centre)
+    {
+        auto t = drawerTab().toFloat();
+        g.setColour (drawerOpen ? Colours::blood : juce::Colour (0xff1e1716));
+        g.fillRoundedRectangle (t.withTrimmedBottom (-6.0f), 6.0f);
+        g.setColour (Colours::red.withAlpha (0.7f));
+        g.drawRoundedRectangle (t.withTrimmedBottom (-6.0f).reduced (0.5f), 6.0f, 1.0f);
+        g.setColour (Colours::text);
+        g.setFont (uiFont (10.5f, true, 0.12f));
+        g.drawText (juce::String::fromUTF8 (drawerOpen ? "\xe2\x96\xbc  CHANNELS" : "\xe2\x96\xb2  CHANNELS"), t, juce::Justification::centred);
+    }
+
+    paintCaptions (g);
 }
 
-void Content::paintOverChildren (juce::Graphics& g)
+void Content::paintCaptions (juce::Graphics& g)
 {
-    // knob captions
+    // knob captions: painted under the child components, so hover tooltips always sit on top
     for (auto& kp : knobs)
     {
         auto& k = *kp;
@@ -1122,17 +1824,6 @@ void Content::paintOverChildren (juce::Graphics& g)
         }
     }
 
-    if (dragOver)
-    {
-        auto b = getLocalBounds().toFloat().reduced (6.0f);
-        g.setColour (juce::Colours::black.withAlpha (0.55f));
-        g.fillRoundedRectangle (b, 12.0f);
-        g.setColour (Colours::ember);
-        g.drawRoundedRectangle (b, 12.0f, 2.0f);
-        g.setFont (uiFont (28.0f, true, 0.1f));
-        g.drawText ("DROP TAKES TO BUILD THE CROWD", b, juce::Justification::centred);
-    }
-
     // balance caption
     auto bb = balance.getBounds().toFloat();
     g.setColour (Colours::text.withAlpha (0.85f));
@@ -1148,25 +1839,49 @@ void Content::paintOverChildren (juce::Graphics& g)
     g.drawText ("F", juce::Rectangle<float> (bb.getRight() + 2, bb.getY(), 12, bb.getHeight()), juce::Justification::centred);
 }
 
+void Content::paintOverChildren (juce::Graphics& g)
+{
+    if (dragOver)
+    {
+        auto b = getLocalBounds().toFloat().reduced (6.0f);
+        g.setColour (juce::Colours::black.withAlpha (0.55f));
+        g.fillRoundedRectangle (b, 12.0f);
+        g.setColour (Colours::ember);
+        g.drawRoundedRectangle (b, 12.0f, 2.0f);
+        g.setFont (uiFont (28.0f, true, 0.1f));
+        const bool toGroup = browser.isVisible() && proc.getActiveGroup() > 0;
+        g.drawText (toGroup ? "DROP TO ADD TO \"" + proc.getActiveGroupLabel().toUpperCase() + "\""
+                            : juce::String ("DROP TAKES TO BUILD THE CROWD"), b, juce::Justification::centred);
+    }
+}
+
 void Content::resized()
 {
-    logo.setBounds (8, 4, 320, 80);
-    rerollButton.setBounds (336, 30, 118, 36);
-    seedValue.setBounds (510, 30, 80, 36);
+    logo.setBounds (8, 4, 292, 80);
+    rerollButton.setBounds (300, 30, 108, 36);
+    crowdsButton.setBounds (414, 30, 100, 36);
+    groupSelector.setBounds (520, 30, 180, 36);
+    seedValue.setBounds (756, 30, 54, 36);
 
     field.setBounds (244, 92, 580, 374);
     meters.setBounds (834, 92, 274, 214);
     takesPanel.setBounds (834, 92, 274, 214);
-    addButton.setBounds (608, 30, 140, 36);
+    addButton.setBounds (820, 30, 88, 36);
     if (proc.inReaper())
     {
-        linkButton.setBounds (758, 30, 140, 36);
-        captureButton.setBounds (908, 30, 140, 36);
+        linkButton.setBounds (914, 30, 92, 36);
+        captureButton.setBounds (1012, 30, 96, 36);
     }
     else
     {
         linkButton.setVisible (false);
-        captureButton.setBounds (758, 30, 140, 36);
+        captureButton.setBounds (914, 30, 194, 36);
+    }
+    browser.setBounds (getLocalBounds());
+    {
+        const int h = 236;
+        drawer.setBounds (12, kDesignH - (int) std::round ((float) h * drawerPos), kDesignW - 24, h);
+        drawer.setVisible (drawerPos > 0.001f);
     }
     room.setBounds (774, 476, 334, 214);
 
@@ -1191,7 +1906,7 @@ void Content::resized()
     // OUTPUT
     knobs[14]->slider.setBounds (862, 372, 62, 62);
     knobs[15]->slider.setBounds (960, 372, 62, 62);
-    outMeter.setBounds (1060, 358, 30, 96);
+    outMeter.setBounds (1034, 354, 66, 104);
 }
 
 //==============================================================================

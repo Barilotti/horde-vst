@@ -5,7 +5,13 @@ using APVTS = juce::AudioProcessorValueTreeState;
 
 static juce::String pct (float v, int) { return juce::String (juce::roundToInt (v * 100.0f)) + " %"; }
 
-APVTS::ParameterLayout HordeProcessor::createLayout()
+const char* HordeProcessor::speakerId (int s)
+{
+    static const char* ids[] = { "L", "R", "C", "LFE", "Ls", "Rs" };
+    return ids[juce::jlimit (0, horde::kNumSpeakers - 1, s)];
+}
+
+APVTS::ParameterLayout HordeProcessor::createLayout (HordeProcessor* owner)
 {
     using namespace juce;
     std::vector<std::unique_ptr<RangedAudioParameter>> ps;
@@ -53,6 +59,23 @@ APVTS::ParameterLayout HordeProcessor::createLayout()
                                                           StringArray { "Field", "Courtyard", "Hall", "Cathedral" }, 2));
     addInt ("seed",      "Seed",         1, 9999, 1);
 
+    ps.push_back (std::make_unique<AudioParameterInt> (ParameterID { "group", 1 }, "Crowd group", 0, horde::kMaxGroups, 0,
+        AudioParameterIntAttributes().withStringFromValueFunction ([owner] (int v, int) { return owner->groupNameForParam (v); })));
+
+    // per output channel: level and dry/crowd mix (mono uses L, stereo L/R, 5.1 all six)
+    auto dbText = [] (float v, int) { return v <= -59.9f ? String ("-inf") : (v > 0 ? "+" : "") + String (v, 1) + " dB"; };
+    for (int s = 0; s < horde::kNumSpeakers; ++s)
+    {
+        const String sp (speakerId (s));
+        addF (("lvl" + sp).toRawUTF8(), ("Level " + sp).toRawUTF8(), -60.0f, 12.0f, 0.0f, -12.0f, dbText);
+        addF (("mix" + sp).toRawUTF8(), ("Mix " + sp).toRawUTF8(), 0.0f, 1.0f, 0.5f, 0.0f, [] (float v, int)
+        {
+            if (std::abs (v - 0.5f) < 0.005f) return String ("both");
+            return v < 0.5f ? "dry " + String (juce::roundToInt ((0.5f - v) * 200.0f)) + "%"
+                            : "crowd " + String (juce::roundToInt ((v - 0.5f) * 200.0f)) + "%";
+        });
+    }
+
     return { ps.begin(), ps.end() };
 }
 
@@ -60,20 +83,27 @@ HordeProcessor::HordeProcessor()
     : AudioProcessor (BusesProperties()
                         .withInput  ("Takes", juce::AudioChannelSet::discreteChannels (horde::kMaxTakes), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
-      apvts (*this, nullptr, "HORDE", createLayout())
+      apvts (*this, nullptr, "HORDE", createLayout (this))
 {
     auto g = [this] (const char* id) { return apvts.getRawParameterValue (id); };
     formats.registerBasicFormats();
     startTimerHz (10);
     raw = { g ("voices"), g ("takes"), g ("maleTakes"), g ("balance"), g ("delayMin"), g ("delaySpread"),
             g ("pitchSpread"), g ("drift"), g ("timbre"), g ("humanize"), g ("distance"), g ("depthSpread"),
-            g ("width"), g ("reverb"), g ("room"), g ("dry"), g ("wet"), g ("seed"), g ("roomType"), g ("scatter"), g ("loose"), g ("mix") };
+            g ("width"), g ("reverb"), g ("room"), g ("dry"), g ("wet"), g ("seed"), g ("roomType"), g ("scatter"), g ("loose"), g ("mix"), g ("group"), {}, {} };
+    for (int s = 0; s < horde::kNumSpeakers; ++s)
+    {
+        raw.lvl[(size_t) s]   = g (("lvl" + juce::String (speakerId (s))).toRawUTF8());
+        raw.chMix[(size_t) s] = g (("mix" + juce::String (speakerId (s))).toRawUTF8());
+    }
+    updateOutputMap();
 }
 
 bool HordeProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
     const auto out = layouts.getMainOutputChannelSet();
-    if (out != juce::AudioChannelSet::stereo() && out != juce::AudioChannelSet::mono())
+    if (out != juce::AudioChannelSet::stereo() && out != juce::AudioChannelSet::mono()
+        && out != juce::AudioChannelSet::create5point1() && out != juce::AudioChannelSet::discreteChannels (6))
         return false;
     const int nIn = layouts.getMainInputChannels();
     return nIn >= 1 && nIn <= 16;
@@ -82,7 +112,28 @@ bool HordeProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 void HordeProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     juce::ignoreUnused (samplesPerBlock);
+    updateOutputMap();
     engine.prepare (sampleRate, 512);
+}
+
+void HordeProcessor::updateOutputMap()
+{
+    const auto set = getChannelLayoutOfBus (false, 0);
+    const int n = set.size();
+    horde::OutFormat f = n >= 6 ? horde::OutFormat::surround51 : n == 1 ? horde::OutFormat::mono : horde::OutFormat::stereo;
+    std::array<int, horde::kNumSpeakers> idx { 0, 1, 2, 3, 4, 5 };   // discrete 6 = L R C LFE Ls Rs
+    if (f == horde::OutFormat::mono)        idx = { 0, -1, -1, -1, -1, -1 };
+    else if (f == horde::OutFormat::stereo) idx = { 0, 1, -1, -1, -1, -1 };
+    else if (! set.isDiscreteLayout())
+    {
+        using CS = juce::AudioChannelSet;
+        const CS::ChannelType types[] = { CS::left, CS::right, CS::centre, CS::LFE, CS::leftSurround, CS::rightSurround };
+        for (int s = 0; s < horde::kNumSpeakers; ++s)
+            idx[(size_t) s] = set.getChannelIndexForType (types[s]);
+    }
+    for (int s = 0; s < horde::kNumSpeakers; ++s)
+        outIndex[(size_t) s].store (idx[(size_t) s]);
+    outFormat.store ((int) f);
 }
 
 void HordeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -112,6 +163,14 @@ void HordeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
     p.scatterMs     = raw.scatter->load();
     p.loose         = raw.loose->load();
     p.mix           = raw.mix->load();
+    p.group         = (int) raw.group->load();
+    p.format        = getOutFormat();
+    for (int s = 0; s < horde::kNumSpeakers; ++s)
+    {
+        p.chanIndex[(size_t) s]  = outIndex[(size_t) s].load();
+        p.chanGainDb[(size_t) s] = raw.lvl[(size_t) s]->load();
+        p.chanMix[(size_t) s]    = raw.chMix[(size_t) s]->load();
+    }
 
     if (auto* ph = getPlayHead())
         if (auto pos = ph->getPosition())
@@ -187,14 +246,24 @@ std::shared_ptr<horde::Take> HordeProcessor::makeTake (const juce::AudioBuffer<f
     for (int c = 0; c < src.getNumChannels(); ++c)
         mono.addFrom (0, 0, src, c, 0, len, 1.0f / (float) src.getNumChannels());
 
-    // Squeeze out long silences (gaps between phrases/items) so voices land on actual shouting.
+    // Squeeze out long silences, noise and breaths between phrases, so voices land on actual shouting.
+    // The decision comes from the speech analysis (adaptive to each recording's noise floor).
     const int hop = juce::jmax (1, (int) (sampleRate * 0.01));
     const int nh = len / hop;
+    horde::Take probe;
+    probe.audio.setDataToReferTo (mono.getArrayOfWritePointers(), 1, len);   // no copy
+    probe.sampleRate = sampleRate;
+    probe.hop = hop;
+    horde::analyseTake (probe);
     std::vector<bool> keep ((size_t) nh, false);
     for (int h = 0; h < nh; ++h)
-        if (mono.getRMSLevel (0, h * hop, hop) > 0.0018f)      // about -55 dBFS
+    {
+        const bool voiced = probe.voiced.empty() ? mono.getRMSLevel (0, h * hop, hop) > 0.0018f
+                                                 : probe.voiced[(size_t) h] != 0;
+        if (voiced)
             for (int k = juce::jmax (0, h - 15); k <= juce::jmin (nh - 1, h + 15); ++k)
                 keep[(size_t) k] = true;
+    }
     int outLen = 0;
     for (int h = 0; h < nh; ++h) if (keep[(size_t) h]) outLen += hop;
     if (outLen < (int) (sampleRate * 0.3))
@@ -220,6 +289,7 @@ std::shared_ptr<horde::Take> HordeProcessor::makeTake (const juce::AudioBuffer<f
         mx = juce::jmax (mx, r);
     }
     if (mx > 0.0f) for (auto& e : t->env) e /= mx;
+    horde::analyseTake (*t);
 
     t->name = name;
     t->path = path;
@@ -231,7 +301,7 @@ void HordeProcessor::addFiles (const juce::StringArray& paths)
 {
     for (const auto& path : paths)
     {
-        if (takes.size() >= 32) break;
+        if (takes.size() >= 64) break;
         juce::File f (path);
         bool dup = false;
         for (auto& t : takes) dup |= (t->path == f.getFullPathName());
@@ -258,12 +328,18 @@ ReaperBridge::Result HordeProcessor::linkChildTracks()
     auto r = reaperBridge.linkChildTracks();
     if (r.ok)
     {
-        // replace previously loaded track takes, keep dropped files
+        // replace previously loaded track takes (keeping their groups), keep dropped files
+        for (auto& t : takes)
+            if (t->path.startsWith ("track:"))
+                pendingTrackGroups.set (t->path, t->group);
         takes.erase (std::remove_if (takes.begin(), takes.end(),
                                      [] (auto& t) { return t->path.startsWith ("track:"); }), takes.end());
         for (auto& ta : r.audio)
             if (auto t = makeTake (ta.mono, ta.sampleRate, ta.name, "track:" + ta.name, ta.female))
+            {
+                t->group = pendingTrackGroups.getValue (t->path, {});
                 takes.push_back (t);
+            }
         linkedToTracks = true;
         publishTakes();
     }
@@ -404,8 +480,111 @@ void HordeProcessor::publishTakes()
 {
     auto lib = std::make_shared<horde::Library>();
     lib->takes = takes;
+    for (auto& t : takes)
+        lib->groupOf.push_back (t->group.isEmpty() ? 0 : groups.indexOf (t->group) + 1);
     engine.setLibrary (std::move (lib));
     if (onTakesChanged) onTakesChanged();
+}
+
+//==============================================================================
+juce::String HordeProcessor::groupNameForParam (int v) const
+{
+    if (v <= 0) return "Custom";
+    const juce::SpinLock::ScopedLockType sl (groupNamesLock);
+    return v <= groupNamesForHost.size() ? groupNamesForHost[v - 1] : "Group " + juce::String (v);
+}
+
+void HordeProcessor::groupsChanged()
+{
+    {
+        const juce::SpinLock::ScopedLockType sl (groupNamesLock);
+        groupNamesForHost = groups;
+    }
+    publishTakes();
+    updateHostDisplay (ChangeDetails().withParameterInfoChanged (true));
+}
+
+juce::String HordeProcessor::createGroup (const juce::String& wanted)
+{
+    if (groups.size() >= horde::kMaxGroups) return {};
+    auto base = wanted.trim().isEmpty() ? juce::String ("Group") : wanted.trim();
+    auto name = base;
+    for (int k = 2; groups.contains (name); ++k)
+        name = base + " " + juce::String (k);
+    groups.add (name);
+    groupsChanged();
+    return name;
+}
+
+void HordeProcessor::renameGroup (int gi, const juce::String& wanted)
+{
+    if (! juce::isPositiveAndBelow (gi, groups.size())) return;
+    auto name = wanted.trim();
+    if (name.isEmpty() || name == groups[gi]) return;
+    auto base = name;
+    for (int k = 2; groups.contains (name); ++k)
+        name = base + " " + juce::String (k);
+    for (auto& t : takes)
+        if (t->group == groups[gi]) t->group = name;
+    groups.set (gi, name);
+    groupsChanged();
+}
+
+void HordeProcessor::deleteGroup (int gi)
+{
+    if (! juce::isPositiveAndBelow (gi, groups.size())) return;
+    for (auto& t : takes)
+        if (t->group == groups[gi]) t->group = {};
+    const int active = getActiveGroup();
+    groups.remove (gi);
+    if (active == gi + 1)     setActiveGroup (0);
+    else if (active > gi + 1) setActiveGroup (active - 1);
+    groupsChanged();
+}
+
+void HordeProcessor::setTakeGroup (int ti, const juce::String& group)
+{
+    if (! juce::isPositiveAndBelow (ti, (int) takes.size())) return;
+    takes[(size_t) ti]->group = groups.contains (group) ? group : juce::String();
+    publishTakes();
+}
+
+int HordeProcessor::getActiveGroup() const
+{
+    return juce::jlimit (0, groups.size(), (int) raw.group->load());
+}
+
+void HordeProcessor::setActiveGroup (int g)
+{
+    g = juce::jlimit (0, groups.size(), g);
+    if (auto* param = apvts.getParameter ("group"))
+    {
+        param->beginChangeGesture();
+        param->setValueNotifyingHost (param->convertTo0to1 ((float) g));
+        param->endChangeGesture();
+    }
+    if (onTakesChanged) onTakesChanged();
+}
+
+void HordeProcessor::stepActiveGroup (int delta)
+{
+    const int n = groups.size() + 1;
+    setActiveGroup (((getActiveGroup() + delta) % n + n) % n);
+}
+
+juce::String HordeProcessor::getActiveGroupLabel() const
+{
+    if (takes.empty()) return "None";
+    const int g = getActiveGroup();
+    return g == 0 ? juce::String ("Custom") : groups[g - 1];
+}
+
+int HordeProcessor::countTakesInGroup (int g) const
+{
+    if (g <= 0) return (int) takes.size();
+    int n = 0;
+    for (auto& t : takes) n += t->group == groups[g - 1] ? 1 : 0;
+    return n;
 }
 
 void HordeProcessor::getStateInformation (juce::MemoryBlock& destData)
@@ -416,7 +595,12 @@ void HordeProcessor::getStateInformation (juce::MemoryBlock& destData)
     files.setProperty ("linkTracks", linkedToTracks, nullptr);
     for (auto& t : takes)
         if (! t->path.startsWith ("track:"))
-            files.appendChild (juce::ValueTree ("File", { { "path", t->path }, { "female", t->female.load() } }), nullptr);
+            files.appendChild (juce::ValueTree ("File", { { "path", t->path }, { "female", t->female.load() }, { "group", t->group } }), nullptr);
+    for (auto& t : takes)
+        if (t->path.startsWith ("track:") && t->group.isNotEmpty())
+            files.appendChild (juce::ValueTree ("TrackGroup", { { "path", t->path }, { "group", t->group } }), nullptr);
+    for (auto& gname : groups)
+        files.appendChild (juce::ValueTree ("Group", { { "name", gname } }), nullptr);
     for (auto& t : takes)
     {
         if (! t->path.startsWith ("capture:")) continue;
@@ -429,7 +613,7 @@ void HordeProcessor::getStateInformation (juce::MemoryBlock& destData)
                 w->writeFromAudioSampleBuffer (t->audio, 0, t->audio.getNumSamples());
         }
         files.appendChild (juce::ValueTree ("Captured", { { "name", t->name }, { "id", t->path }, { "female", t->female.load() },
-                                                          { "flac", mb.toBase64Encoding() } }), nullptr);
+                                                          { "group", t->group }, { "flac", mb.toBase64Encoding() } }), nullptr);
     }
     state.appendChild (files, nullptr);
     if (auto xml = state.createXml())
@@ -446,8 +630,13 @@ void HordeProcessor::setStateInformation (const void* data, int sizeInBytes)
             juce::StringArray paths;
             std::vector<bool> fem;
             std::vector<std::shared_ptr<horde::Take>> captured;
+            juce::StringArray fileGroups;
+            groups.clear();
+            pendingTrackGroups.clear();
             for (auto f : files)
             {
+                if (f.hasType ("Group"))      { groups.addIfNotAlreadyThere (f["name"].toString()); continue; }
+                if (f.hasType ("TrackGroup")) { pendingTrackGroups.set (f["path"].toString(), f["group"].toString()); continue; }
                 if (f.hasType ("Captured"))
                 {
                     juce::MemoryBlock mb;
@@ -459,12 +648,16 @@ void HordeProcessor::setStateInformation (const void* data, int sizeInBytes)
                         juce::AudioBuffer<float> b (1, (int) rd->lengthInSamples);
                         rd->read (&b, 0, (int) rd->lengthInSamples, 0, true, false);
                         if (auto t = makeTake (b, rd->sampleRate, f["name"].toString(), f["id"].toString(), (bool) f["female"]))
+                        {
+                            t->group = f["group"].toString();
                             captured.push_back (t);
+                        }
                     }
                     continue;
                 }
                 paths.add (f["path"].toString());
                 fem.push_back ((bool) f["female"]);
+                fileGroups.add (f["group"].toString());
             }
             tree.removeChild (files, nullptr);
             apvts.replaceState (tree);
@@ -478,7 +671,11 @@ void HordeProcessor::setStateInformation (const void* data, int sizeInBytes)
             for (size_t i = 0; i < takes.size(); ++i)
                 for (int k = 0; k < paths.size(); ++k)
                     if (paths[k] == takes[i]->path && (size_t) k < fem.size())
+                    {
                         takes[i]->female = fem[(size_t) k];
+                        takes[i]->group = fileGroups[k];
+                    }
+            groupsChanged();
         }
 }
 
